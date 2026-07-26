@@ -13,6 +13,8 @@ export const dbStorage = new AsyncLocalStorage<ZhiroxDatabase>();
 const app = express();
 const PORT = 3000;
 
+export const DEFAULT_MARKET_ID = 'mkt-default';
+
 app.use(express.json());
 
 // Supabase Connection Setup
@@ -299,74 +301,19 @@ interface ZhiroxDatabase {
   };
 }
 
-const DEFAULT_MARKET_ID = 'zhirox-market-erbil';
-
-// Clean seed data for Zhirox (System Owner only)
+// Clean empty data structure
 const INITIAL_DATA: ZhiroxDatabase = {
-  system_users: [
-    {
-      id: 'usr-103',
-      name: 'خاوەنی سیستەم (Platform Owner)',
-      phone: '07500000000',
-      role: 'PLATFORM_OWNER',
-      status: 'ACTIVE',
-      permissions: ['ALL', 'can_manage_markets', 'can_manage_licenses'],
-      created_at: new Date().toISOString()
-    }
-  ],
-  users: [
-    {
-      id: 'usr-platform-owner',
-      auth_user_id: 'usr-platform-owner',
-      full_name: 'خاوەنی سیستەم (Platform Owner)',
-      email: 'admin@zhirox.com',
-      phone: '07500000000',
-      is_active: true,
-      created_at: new Date().toISOString()
-    }
-  ],
-  platform_access: [
-    {
-      id: 'pa-platform-owner',
-      user_id: 'usr-platform-owner',
-      role: 'PLATFORM_OWNER',
-      status: 'ACTIVE',
-      created_at: new Date().toISOString()
-    }
-  ],
-  customer_auth_links: [
-    {
-      id: 'cal-auth-a',
-      market_id: 'zhirox-market-erbil',
-      customer_id: 'cust-1',
-      auth_user_id: 'auth-cust-a',
-      status: 'ACTIVE',
-      linked_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
-  ],
-  markets: [
-    {
-      id: DEFAULT_MARKET_ID,
-      name: 'مارکێتی ژیرۆکس - هەولێر',
-      status: 'ACTIVE',
-      owner_name: 'کاک کاوان',
-      owner_email: 'kawan@zhirox.com',
-      owner_phone: '07501234567',
-      created_at: new Date().toISOString(),
-      license_expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-      managers_count: 1,
-      customers_count: 0,
-      currency: 'IQD'
-    }
-  ],
+  system_users: [],
+  users: [],
+  platform_access: [],
+  customer_auth_links: [],
+  markets: [],
   settings: {
     market_name: 'سیستەمی سەرەکی ژیرۆکس',
-    owner_name: 'خاوەنی سیستەم',
-    market_id: DEFAULT_MARKET_ID,
+    owner_name: '',
+    market_id: '',
     pin_enabled: false,
-    pin_code: '1234',
+    pin_code: '',
     language: 'ku',
     default_currency: 'IQD',
     theme: 'dark'
@@ -378,20 +325,7 @@ const INITIAL_DATA: ZhiroxDatabase = {
   attachments: [],
   disputes: [],
   audit_logs: [],
-  customers: [
-    {
-      id: 'cust-1',
-      market_id: DEFAULT_MARKET_ID,
-      seq_num: 1,
-      name: 'ئارام بارزانی',
-      phone: '07501112233',
-      currency: 'IQD',
-      notes: '',
-      status: 'ACTIVE',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
-  ],
+  customers: [],
   transactions: [],
   activation_tokens: [],
   approval_requests: [],
@@ -3521,91 +3455,7 @@ app.get('/api/auth/context', handleAuthContext);
 app.post('/api/auth/context', handleAuthContext);
 
 // Endpoint to resolve Supabase auth_user_id against authoritative market memberships table
-app.post('/api/auth/resolve-identity', async (req, res) => {
-  const { auth_user_id, email, phone } = req.body;
-
-  if (!auth_user_id && !email && !phone) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'ناسنامە داواکراوە'
-    });
-  }
-
-  if (!pool) {
-    return res.status(503).json({
-      status: 'error',
-      message: 'Database unavailable / connection failure. System fails closed.'
-    });
-  }
-
-  if (pool) {
-    try {
-      const resDb = await pool.query(`
-        SELECT mm.*, m.name as market_name, u.email as user_email, u.full_name as user_full_name
-        FROM public.market_memberships mm
-        JOIN public.users u ON mm.user_id = u.id
-        JOIN public.markets m ON mm.market_id = m.id
-        WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text)
-          AND u.is_active = true
-          AND mm.status = 'ACTIVE'
-      `, [auth_user_id || '']);
-
-      if (resDb.rows.length > 0) {
-        return res.json({
-          status: 'AUTHENTICATED',
-          auth_user_id,
-          contexts: resDb.rows.map(m => ({
-            context_id: m.id,
-            tenant_id: m.market_id,
-            tenant_name: m.market_name || db.settings.market_name || 'سوپەرمارکێتی ژیرۆکس',
-            role: m.role || 'EMPLOYEE',
-            role_label_ku: m.role === 'MARKET_OWNER' || m.role === 'OWNER' ? 'خاوەن شوێن' : m.role === 'MANAGER' ? 'بەڕێوەبەر' : 'کارمەند'
-          }))
-        });
-      }
-    } catch (err) {
-      console.error('Failed to query database for user memberships:', err);
-    }
-  }
-
-  try {
-    const paRes = await pool.query(`
-      SELECT pa.role, pa.status, u.id as user_id, u.auth_user_id
-      FROM public.platform_access pa
-      JOIN public.users u ON pa.user_id = u.id
-      WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text)
-        AND pa.role = 'PLATFORM_OWNER'
-        AND pa.status = 'ACTIVE'
-        AND u.is_active = true
-    `, [auth_user_id || '']);
-
-    if (paRes.rows.length > 0) {
-      const row = paRes.rows[0];
-      return res.json({
-        status: 'AUTHENTICATED',
-        auth_user_id: row.auth_user_id || auth_user_id || row.user_id,
-        contexts: [
-          {
-            context_id: 'mem-platform-owner',
-            tenant_id: 'SYSTEM_GLOBAL',
-            tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-            role: 'PLATFORM_OWNER',
-            role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-            permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-          }
-        ]
-      });
-    }
-  } catch (err) {
-    console.error('Error checking platform access in resolve-identity:', err);
-  }
-
-  return res.json({
-    status: 'UNAUTHORIZED',
-    message: 'ئەم هەژمارە بە هیچ مارکێتێکی چالاک نەبەستراوەتەوە.',
-    contexts: []
-  });
-});
+app.post('/api/auth/resolve-identity', handleAuthContext);
 
 // VERIFIED SUPABASE AUTHENTICATION & PLATFORM AUTHORITY HELPERS
 export function extractBearerToken(req: express.Request): string | null {
@@ -3621,48 +3471,9 @@ export function extractBearerToken(req: express.Request): string | null {
 export async function verifySupabaseAccessToken(token: string): Promise<{ id: string } | null> {
   if (!token || typeof token !== 'string') return null;
   const trimmed = token.trim();
-  if (!trimmed || trimmed.length < 10) return null;
+  if (!trimmed) return null;
 
-  if (trimmed === 'zhirox_platform_owner_session' || trimmed === 'zhirox_session_active') {
-    if (pool) {
-      try {
-        const poRes = await pool.query(`
-          SELECT u.id, u.auth_user_id
-          FROM public.platform_access pa
-          JOIN public.users u ON pa.user_id = u.id
-          WHERE pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
-          LIMIT 1
-        `);
-        if (poRes.rows.length > 0) {
-          return { id: poRes.rows[0].auth_user_id || poRes.rows[0].id };
-        }
-      } catch (e) {}
-    }
-    return { id: 'usr-platform-owner' };
-  }
-  if (trimmed.startsWith('zhirox_session_')) {
-    let remainder = trimmed.substring('zhirox_session_'.length);
-    if (remainder.startsWith('user_')) {
-      remainder = remainder.substring(5);
-    }
-    const lastUnderscore = remainder.lastIndexOf('_');
-    const userId = lastUnderscore > 0 ? remainder.substring(0, lastUnderscore) : remainder;
-    if (userId) {
-      return { id: userId };
-    }
-  }
-
-  // Reject hardcoded fake tokens or substring tricks
-  if (
-    trimmed === 'platform-owner-jwt' ||
-    trimmed.includes('usr-platform-owner') ||
-    trimmed.includes('fake') ||
-    trimmed.includes('mock')
-  ) {
-    return null;
-  }
-
-  // 1. Verify against Supabase Auth server if client is configured
+  // 1. Verify against Supabase Auth server if client is configured and token has 3 parts
   if (supabase && trimmed.split('.').length === 3) {
     try {
       const { data, error } = await supabase.auth.getUser(trimmed);
@@ -3674,7 +3485,7 @@ export async function verifySupabaseAccessToken(token: string): Promise<{ id: st
     }
   }
 
-  // 2. Cryptographic verification if JWT secret is configured
+  // 2. Cryptographic HMAC verification if JWT secret is configured
   const jwtSecret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET;
   if (jwtSecret) {
     try {
@@ -3715,9 +3526,6 @@ export async function isActorPlatformOwner(req: express.Request): Promise<boolea
   }
 
   const authUserId = verifiedUser.id;
-  if (authUserId === 'usr-platform-owner') {
-    return true;
-  }
 
   // Query PostgreSQL public.platform_access joined with public.users
   if (pool) {
@@ -3726,7 +3534,7 @@ export async function isActorPlatformOwner(req: express.Request): Promise<boolea
         SELECT pa.status, u.is_active
         FROM public.users u
         JOIN public.platform_access pa ON pa.user_id = u.id
-        WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text)
+        WHERE u.auth_user_id::text = $1::text
           AND u.is_active = true
           AND pa.role = 'PLATFORM_OWNER'
           AND pa.status = 'ACTIVE'
@@ -3748,153 +3556,85 @@ export async function verifyTenantActor(req: express.Request): Promise<{
   message?: string;
   userId?: string;
   marketId?: string;
+  role?: string;
+  permissions?: string[];
 }> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    return { authorized: false, code: 'UNAUTHORIZED', message: 'تۆکنی چوونەژوورەوە نەدۆزرایەوە' };
+  }
+
+  const verifiedUser = await verifySupabaseAccessToken(token);
+  if (!verifiedUser || !verifiedUser.id) {
+    return { authorized: false, code: 'UNAUTHORIZED', message: 'تۆکنی چوونەژوورەوە ناڕاستە یان بەسەرچووە' };
+  }
+
+  // Platform owner invariant check: platform owner cannot perform tenant operations
+  const isPO = await isActorPlatformOwner(req);
+  if (isPO) {
+    return {
+      authorized: false,
+      code: 'PLATFORM_OWNER_TENANT_ACCESS_DENIED',
+      message: 'خاوەنی سیستەم دەستگەیشتنی نییە بۆ داتاکانی مارکێت'
+    };
+  }
+
   const requestedMarketId =
     req.params?.market_id ||
     req.body?.market_id ||
     (req.query?.market_id as string) ||
     (req.headers['x-active-tenant-id'] as string) ||
-    (req.headers['x-market-id'] as string) ||
-    'zhirox-market-erbil';
+    (req.headers['x-market-id'] as string);
 
-  // Check for mock headers from tests
-  const mockRole = req.headers['x-user-role'] as string;
-  const authUserId =
-    (req.headers['x-auth-user-id'] as string) ||
-    (req.headers['x-user-id'] as string) ||
-    '';
+  if (!requestedMarketId) {
+    return { authorized: false, code: 'MARKET_ID_REQUIRED', message: 'مارکێت دیاری نەکراوە' };
+  }
 
-  if (mockRole) {
-    let hasCustomerLink = false;
-    if (authUserId) {
-      if (pool) {
-        try {
-          const checkRes = await pool.query(
-            "SELECT id FROM public.customer_auth_links WHERE auth_user_id::text = $1::text AND status = 'ACTIVE'",
-            [authUserId]
-          );
-          if (checkRes.rows.length > 0) hasCustomerLink = true;
-        } catch (e) {
-          console.error('Error checking mock customer link:', e);
-        }
-      }
-      if (!hasCustomerLink && (db as any).customer_auth_links) {
-        hasCustomerLink = (db as any).customer_auth_links.some(
-          (l: any) => l.auth_user_id === authUserId && l.status === 'ACTIVE'
-        );
-      }
+  if (!pool) {
+    return { authorized: false, code: 'DATABASE_UNAVAILABLE', message: 'بنکەی زانیاری دەستنەکەوت' };
+  }
+
+  try {
+    const dbRes = await pool.query(`
+      SELECT mm.role, mm.status, mm.market_id, mm.permissions, u.id as user_id, u.is_active
+      FROM public.users u
+      JOIN public.market_memberships mm ON mm.user_id = u.id
+      WHERE u.auth_user_id::text = $1::text
+        AND mm.market_id = $2::text
+        AND u.is_active = true
+    `, [verifiedUser.id, requestedMarketId]);
+
+    if (dbRes.rows.length === 0) {
+      return { authorized: false, code: 'MEMBERSHIP_NOT_FOUND', message: 'ئەندامێتی نەدۆزرایەوە بۆ ئەم مارکێتە' };
     }
 
-    if (authUserId.startsWith('auth-cust') || mockRole === 'CUSTOMER' || hasCustomerLink) {
+    const member = dbRes.rows[0];
+    if (member.status !== 'ACTIVE') {
+      return { authorized: false, code: 'MEMBERSHIP_INACTIVE', message: 'ئەندامێتی چالاک نییە' };
+    }
+
+    const roleUpper = (member.role || '').toUpperCase();
+    if (roleUpper === 'CUSTOMER') {
       return { authorized: false, code: 'CUSTOMER_ACCESS_DENIED', message: 'کڕیار ڕێگەی پێدراو نییە بۆ ڕێڕەوی کارمەندان' };
     }
 
-    const mockStatus = req.headers['x-membership-status'] as string;
-    const mockMarketId = req.headers['x-market-id'] as string;
-
-    if (mockStatus && mockStatus !== 'ACTIVE') {
-      return { authorized: false, code: 'SUSPENDED_OR_REVOKED', message: 'بارودۆخی ئەندامێتی چالاک نییە' };
-    }
-
-    if (mockRole === 'EMPLOYEE' && mockMarketId && mockMarketId !== requestedMarketId) {
-      return { authorized: false, code: 'FOREIGN_MARKET_ACCESS_DENIED', message: 'دەرەوەی سنوری مارکێتەکەتە' };
-    }
-
-    if (mockRole === 'MANAGER' && mockMarketId && mockMarketId !== requestedMarketId) {
-      return { authorized: false, code: 'FOREIGN_MARKET_ACCESS_DENIED', message: 'دەرەوەی سنوری مارکێتەکەتە' };
+    let perms: string[] = [];
+    if (Array.isArray(member.permissions)) perms = member.permissions;
+    else if (typeof member.permissions === 'string') {
+      try { perms = JSON.parse(member.permissions); } catch { perms = []; }
     }
 
     return {
       authorized: true,
-      userId: 'usr-mock-actor',
-      marketId: requestedMarketId
+      userId: member.user_id,
+      marketId: member.market_id,
+      role: member.role,
+      permissions: perms
     };
+  } catch (err) {
+    console.error('Error verifying tenant actor in DB:', err);
+    return { authorized: false, code: 'INTERNAL_ERROR', message: 'خەتای سێرڤەر ڕوویدا' };
   }
-
-  // Real Authenticated Path
-  const token = extractBearerToken(req);
-  if (token) {
-    const verifiedUser = await verifySupabaseAccessToken(token);
-    if (verifiedUser && verifiedUser.id) {
-      const activeAuthUserId = verifiedUser.id;
-
-      // Platform Owner override check
-      const isPlatformOwner = await isActorPlatformOwner(req);
-      if (isPlatformOwner) {
-        return {
-          authorized: true,
-          userId: activeAuthUserId,
-          marketId: requestedMarketId
-        };
-      }
-
-      if (pool) {
-        try {
-          const dbRes = await pool.query(`
-            SELECT mm.role, mm.status, mm.market_id, u.id as user_id
-            FROM public.users u
-            JOIN public.market_memberships mm ON mm.user_id = u.id
-            WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text OR u.phone::text = $1::text OR u.email::text = $1::text)
-              AND u.is_active = true
-          `, [activeAuthUserId]);
-
-          if (dbRes.rows.length > 0) {
-            const member = dbRes.rows.find(r => r.market_id === requestedMarketId) || dbRes.rows[0];
-            if (member.status !== 'ACTIVE') {
-              return { authorized: false, code: 'MEMBERSHIP_INACTIVE', message: 'ئەندامێتی چالاک نییە' };
-            }
-
-            const roleUpper = (member.role || '').toUpperCase();
-            if (['OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER', 'ADMIN', 'PLATFORM_OWNER'].includes(roleUpper)) {
-              return {
-                authorized: true,
-                userId: member.user_id,
-                marketId: member.market_id || requestedMarketId
-              };
-            }
-
-            if (roleUpper === 'EMPLOYEE' || roleUpper === 'CUSTOMER') {
-              return {
-                authorized: false,
-                code: 'EMPLOYEE_ACCESS_DENIED',
-                message: 'تەنها بەڕێوەبەر و خاوەن شوێن دەتوانن دەسەڵاتەکانی کارمەندان بەڕێوەببەن'
-              };
-            }
-          }
-        } catch (err) {
-          console.error('Error verifying tenant actor in DB:', err);
-        }
-      }
-
-      // Fallback for valid session tokens when DB membership row is not explicitly bound
-      if (
-        activeAuthUserId === 'usr-platform-owner' ||
-        activeAuthUserId.startsWith('usr-') ||
-        activeAuthUserId.startsWith('auth-') ||
-        token.includes('zhirox_session') ||
-        token.includes('platform_owner')
-      ) {
-        return {
-          authorized: true,
-          userId: activeAuthUserId,
-          marketId: requestedMarketId
-        };
-      }
-    }
-  }
-
-  // Fallback for local preview / dev environment without explicit auth token
-  if (!token || process.env.NODE_ENV !== 'production') {
-    return {
-      authorized: true,
-      userId: 'usr-local-owner',
-      marketId: requestedMarketId !== 'SYSTEM_GLOBAL' && requestedMarketId !== 'mkt-default' && requestedMarketId !== 'zhirox-market-erbil'
-        ? requestedMarketId
-        : 'market-mrx3a7x4'
-    };
-  }
-
-  return { authorized: false, code: 'UNAUTHORIZED', message: 'ڕێگەپێدراو نییە' };
 }
 
 export const APPROVED_PERMISSIONS = [
@@ -3919,287 +3659,191 @@ export async function verifyTenantPermission(
   role?: string;
   permissions?: string[];
 }> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'تۆکنی چوونەژوورەوە نەدۆزرایەوە' });
+    return { authorized: false };
+  }
+
+  const verifiedUser = await verifySupabaseAccessToken(token);
+  if (!verifiedUser || !verifiedUser.id) {
+    res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'تۆکنی چوونەژوورەوە ناڕاستە یان بەسەرچووە' });
+    return { authorized: false };
+  }
+
   const requestedMarketId =
     marketIdOverride ||
     req.params?.market_id ||
     req.body?.market_id ||
     (req.query?.market_id as string) ||
     (req.headers['x-active-tenant-id'] as string) ||
-    (req.headers['x-market-id'] as string) ||
-    'zhirox-market-erbil';
+    (req.headers['x-market-id'] as string);
 
-  // Check for mock headers from tests
-  const mockRole = req.headers['x-user-role'] as string;
-  const authUserId =
-    (req.headers['x-auth-user-id'] as string) ||
-    (req.headers['x-user-id'] as string) ||
-    '';
-
-  if (mockRole) {
-    let hasCustomerLink = false;
-    if (authUserId) {
-      if (pool) {
-        try {
-          const checkRes = await pool.query(
-            "SELECT id FROM public.customer_auth_links WHERE auth_user_id::text = $1::text AND status = 'ACTIVE'",
-            [authUserId]
-          );
-          if (checkRes.rows.length > 0) hasCustomerLink = true;
-        } catch (e) {
-          console.error('Error checking mock customer link:', e);
-        }
-      }
-      if (!hasCustomerLink && (db as any).customer_auth_links) {
-        hasCustomerLink = (db as any).customer_auth_links.some(
-          (l: any) => l.auth_user_id === authUserId && l.status === 'ACTIVE'
-        );
-      }
-    }
-
-    if (authUserId.startsWith('auth-cust') || mockRole === 'CUSTOMER' || hasCustomerLink) {
-      res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - کڕیار ڕێگەپێدراو نییە بۆ ڕێڕەوی کارمەندان' });
-      return { authorized: false };
-    }
-
-    const mockStatus = req.headers['x-membership-status'] as string;
-    const mockMarketId = req.headers['x-market-id'] as string;
-    const mockPermissionsStr = req.headers['x-user-permissions'] as string;
-    const mockPermissions = mockPermissionsStr ? mockPermissionsStr.split(',') : [];
-
-    if (mockStatus && mockStatus !== 'ACTIVE') {
-      res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - ئەندامێتی چالاک نییە' });
-      return { authorized: false };
-    }
-
-    if (mockRole === 'EMPLOYEE' && mockMarketId && mockMarketId !== requestedMarketId) {
-      res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - دەرەوەی سنوری مارکێتەکەتە' });
-      return { authorized: false };
-    }
-
-    if (mockRole === 'MANAGER' && mockMarketId && mockMarketId !== requestedMarketId) {
-      res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - دەرەوەی سنوری مارکێتەکەتە' });
-      return { authorized: false };
-    }
-
-    if (mockRole === 'EMPLOYEE') {
-      if (!mockPermissions.includes(requiredPermission)) {
-        res.status(403).json({ status: 'error', message: `پێویستت بە دەسەڵاتی ${requiredPermission} هەیە` });
-        return { authorized: false };
-      }
-    }
-
-    return {
-      authorized: true,
-      userId: 'usr-mock-actor',
-      marketId: requestedMarketId,
-      role: mockRole,
-      permissions: mockPermissions
-    };
-  }
-
-  // Real Authenticated Request Path
+  // Special platform owner permission check for MANAGE_PLATFORM
   if (requestedMarketId === 'SYSTEM_GLOBAL' || requiredPermission === 'MANAGE_PLATFORM') {
-    const isOwner = await isActorPlatformOwner(req);
-    if (isOwner) {
+    const isPO = await isActorPlatformOwner(req);
+    if (isPO) {
       return {
         authorized: true,
-        userId: 'usr-platform-owner',
+        userId: verifiedUser.id,
         marketId: 'SYSTEM_GLOBAL',
         role: 'PLATFORM_OWNER',
         permissions: ['ALL']
       };
+    } else {
+      res.status(403).json({ status: 'error', code: 'PLATFORM_OWNER_REQUIRED', message: 'تەنها خاوەنی سیستەم ئەم دەسەڵاتەی هەیە' });
+      return { authorized: false };
     }
   }
 
-  const token = extractBearerToken(req);
-  if (token) {
-    const verifiedUser = await verifySupabaseAccessToken(token);
-    if (verifiedUser && verifiedUser.id) {
-      const activeAuthUserId = verifiedUser.id;
-      if (pool) {
-        try {
-          const dbRes = await pool.query(`
-            SELECT mm.role, mm.permissions, mm.status, mm.market_id, u.id as user_id
-            FROM public.users u
-            JOIN public.market_memberships mm ON mm.user_id = u.id
-            WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text) AND u.is_active = true AND mm.market_id = $2
-          `, [activeAuthUserId, requestedMarketId]);
+  // Tenant endpoints: Platform owner is NOT allowed access to tenant financial data
+  const isPO = await isActorPlatformOwner(req);
+  if (isPO) {
+    res.status(403).json({ status: 'error', code: 'PLATFORM_OWNER_TENANT_ACCESS_DENIED', message: 'خاوەنی سیستەم دەستگەیشتنی نییە بۆ داتاکانی مارکێت' });
+    return { authorized: false };
+  }
 
-          if (dbRes.rows.length > 0) {
-            const member = dbRes.rows[0];
-            if (member.status !== 'ACTIVE') {
-              res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - ئەندامێتی چالاک نییە' });
-              return { authorized: false };
-            }
+  if (!requestedMarketId) {
+    res.status(400).json({ status: 'error', code: 'MARKET_ID_REQUIRED', message: 'مارکێت دیاری نەکراوە' });
+    return { authorized: false };
+  }
 
-            let dbPerms: string[] = [];
-            if (Array.isArray(member.permissions)) {
-              dbPerms = member.permissions;
-            } else if (typeof member.permissions === 'string') {
-              try { dbPerms = JSON.parse(member.permissions); } catch { dbPerms = []; }
-            }
+  if (!pool) {
+    res.status(503).json({ status: 'error', code: 'DATABASE_UNAVAILABLE', message: 'بنکەی زانیاری دەستنەکەوت' });
+    return { authorized: false };
+  }
 
-            if (member.role === 'OWNER' || member.role === 'MARKET_OWNER' || member.role === 'MANAGER') {
-              return {
-                authorized: true,
-                userId: member.user_id,
-                marketId: requestedMarketId,
-                role: member.role,
-                permissions: ['ALL', ...APPROVED_PERMISSIONS]
-              };
-            }
+  try {
+    const dbRes = await pool.query(`
+      SELECT mm.role, mm.permissions, mm.status, mm.market_id, u.id as user_id, u.is_active
+      FROM public.users u
+      JOIN public.market_memberships mm ON mm.user_id = u.id
+      WHERE u.auth_user_id::text = $1::text AND mm.market_id = $2::text AND u.is_active = true
+    `, [verifiedUser.id, requestedMarketId]);
 
-            if (member.role === 'EMPLOYEE') {
-              if (dbPerms.includes(requiredPermission)) {
-                return {
-                  authorized: true,
-                  userId: member.user_id,
-                  marketId: requestedMarketId,
-                  role: 'EMPLOYEE',
-                  permissions: dbPerms
-                };
-              }
-            }
-          }
+    if (dbRes.rows.length === 0) {
+      res.status(403).json({ status: 'error', code: 'MEMBERSHIP_NOT_FOUND', message: 'ئەندامێتی نەدۆزرایەوە برای ئەم مارکێتە' });
+      return { authorized: false };
+    }
 
-          const isPlatformOwner = await isActorPlatformOwner(req);
-          if (isPlatformOwner) {
-            return {
-              authorized: true,
-              userId: activeAuthUserId,
-              marketId: requestedMarketId,
-              role: 'PLATFORM_OWNER',
-              permissions: ['ALL']
-            };
-          }
-        } catch (err) {
-          console.error('Error verifying tenant permission in DB:', err);
-        }
-      } else {
-        // Fallback for in-memory / local mode (pool is null)
-        const isPlatformOwner = activeAuthUserId === 'usr-platform-owner' || 
-                               (db.system_users && db.system_users.some(u => u.id === activeAuthUserId && u.role === 'PLATFORM_OWNER'));
-        if (isPlatformOwner) {
-          return {
-            authorized: true,
-            userId: activeAuthUserId,
-            marketId: requestedMarketId,
-            role: 'PLATFORM_OWNER',
-            permissions: ['ALL']
-          };
-        }
+    const member = dbRes.rows[0];
+    if (member.status !== 'ACTIVE') {
+      res.status(403).json({ status: 'error', code: 'MEMBERSHIP_INACTIVE', message: 'دەستگەیشتن ڕەتکرایەوە - ئەندامێتی چالاک نییە' });
+      return { authorized: false };
+    }
 
-        const u = db.system_users && db.system_users.find(user => user.id === activeAuthUserId);
-        if (u) {
-          if (u.status !== 'ACTIVE') {
-            res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - ئەندامێتی چالاک نییە' });
-            return { authorized: false };
-          }
-          const userRole = u.role || 'MARKET_OWNER';
-          const userPerms = u.permissions || ['ALL', ...APPROVED_PERMISSIONS];
-          return {
-            authorized: true,
-            userId: activeAuthUserId,
-            marketId: requestedMarketId,
-            role: userRole,
-            permissions: userRole === 'PLATFORM_OWNER' || userRole === 'MARKET_OWNER' || userRole === 'MANAGER' 
-              ? ['ALL', ...APPROVED_PERMISSIONS] 
-              : userPerms
-          };
-        }
+    const roleUpper = (member.role || '').toUpperCase();
+    if (roleUpper === 'CUSTOMER') {
+      res.status(403).json({ status: 'error', code: 'CUSTOMER_ACCESS_DENIED', message: 'کڕیار ڕێگەی پێدراو نییە بۆ ڕێڕەوی کارمەندان' });
+      return { authorized: false };
+    }
 
-        // Default local owner fallback for verified users
+    if (['OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER', 'ADMIN'].includes(roleUpper)) {
+      return {
+        authorized: true,
+        userId: member.user_id,
+        marketId: member.market_id,
+        role: member.role,
+        permissions: ['ALL', ...APPROVED_PERMISSIONS]
+      };
+    }
+
+    if (roleUpper === 'EMPLOYEE') {
+      let dbPerms: string[] = [];
+      if (Array.isArray(member.permissions)) dbPerms = member.permissions;
+      else if (typeof member.permissions === 'string') {
+        try { dbPerms = JSON.parse(member.permissions); } catch { dbPerms = []; }
+      }
+
+      if (dbPerms.includes(requiredPermission)) {
         return {
           authorized: true,
-          userId: activeAuthUserId,
-          marketId: requestedMarketId,
-          role: 'MARKET_OWNER',
-          permissions: ['ALL', ...APPROVED_PERMISSIONS]
+          userId: member.user_id,
+          marketId: member.market_id,
+          role: 'EMPLOYEE',
+          permissions: dbPerms
         };
+      } else {
+        res.status(403).json({ status: 'error', code: 'PERMISSION_DENIED', message: `پێویستت بە دەسەڵاتی ${requiredPermission} هەیە` });
+        return { authorized: false };
       }
     }
-  }
 
-  // Fallback for local session / market owner when Supabase token is not used or not configured
-  if (requestedMarketId && requestedMarketId !== 'SYSTEM_GLOBAL' && requiredPermission !== 'MANAGE_PLATFORM') {
-    return {
-      authorized: true,
-      userId: 'usr-local-owner',
-      marketId: requestedMarketId,
-      role: 'MARKET_OWNER',
-      permissions: ['ALL', ...APPROVED_PERMISSIONS]
-    };
+    res.status(403).json({ status: 'error', code: 'ACCESS_DENIED', message: 'دەستگەیشتن ڕەتکرایەوە' });
+    return { authorized: false };
+  } catch (err) {
+    console.error('Error verifying tenant permission in DB:', err);
+    res.status(500).json({ status: 'error', code: 'INTERNAL_ERROR', message: 'خەتای سێرڤەر ڕوویدا' });
+    return { authorized: false };
   }
-
-  res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە' });
-  return { authorized: false };
 }
 
 export async function requireCustomerContext(req: express.Request, res: express.Response) {
-  const authUserId =
-    (req.headers['x-auth-user-id'] as string) ||
-    (req.headers['x-user-id'] as string) ||
-    (req as any).user?.id ||
-    '';
-
-  const forcedCustomerId = (req.headers['x-customer-id'] as string) || '';
-  const forcedMarketId = (req.headers['x-market-id'] as string) || '';
-
-  if (!isValidUuid(authUserId)) {
+  const token = extractBearerToken(req);
+  if (!token) {
     res.status(403).json({
       status: 'error',
       code: 'CUSTOMER_PORTAL_DENIED',
-      message: 'دەستگەیشتن بە پۆڕتاڵی کڕیار ڕەتکرایەوە - هەژماری چالاک نەدۆزرایەوە (403 Forbidden)'
+      message: 'دەستگەیشتن بە پۆڕتاڵی کڕیار ڕەتکرایەوە - تۆکن نەدۆزرایەوە (403 Forbidden)'
     });
     return null;
   }
 
-  let link: any = null;
+  const verifiedUser = await verifySupabaseAccessToken(token);
+  if (!verifiedUser || !verifiedUser.id) {
+    res.status(403).json({
+      status: 'error',
+      code: 'CUSTOMER_PORTAL_DENIED',
+      message: 'دەستگەیشتن بە پۆڕتاڵی کڕیار ڕەتکرایەوە - تۆکنی ناکارامە (403 Forbidden)'
+    });
+    return null;
+  }
 
-  if (pool && authUserId) {
-    try {
-      const dbRes = await pool.query(`
-        SELECT cal.*, c.name as customer_name, m.name as market_name
-        FROM public.customer_auth_links cal
-        JOIN public.customers c ON cal.market_id = c.market_id AND cal.customer_id = c.id
-        JOIN public.markets m ON cal.market_id = m.id
-        WHERE cal.auth_user_id::text = $1::text AND cal.status = 'ACTIVE'
-      `, [authUserId]);
-      if (dbRes.rows.length > 0) {
-        link = dbRes.rows[0];
-      }
-    } catch (e) {
-      console.error('Error querying customer_auth_links in DB:', e);
+  if (!pool) {
+    res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'بنکەی زانیاری دەستنەکەوت'
+    });
+    return null;
+  }
+
+  try {
+    const dbRes = await pool.query(`
+      SELECT cal.*, c.name as customer_name, m.name as market_name
+      FROM public.customer_auth_links cal
+      JOIN public.customers c ON cal.market_id = c.market_id AND cal.customer_id = c.id
+      JOIN public.markets m ON cal.market_id = m.id
+      WHERE cal.auth_user_id::text = $1::text AND cal.status = 'ACTIVE'
+    `, [verifiedUser.id]);
+
+    if (dbRes.rows.length === 0) {
+      res.status(403).json({
+        status: 'error',
+        code: 'CUSTOMER_PORTAL_DENIED',
+        message: 'دەستگەیشتن بە پۆڕتاڵی کڕیار ڕەتکرایەوە - بەستەری هەژمار نەدۆزرایەوە (403 Forbidden)'
+      });
+      return null;
     }
-  }
 
-  if (!link && (db as any).customer_auth_links) {
-    link = (db as any).customer_auth_links.find(
-      (l: any) =>
-        l.auth_user_id === authUserId &&
-        l.status === 'ACTIVE'
-    );
-  }
-
-
-
-  if (!link || link.status !== 'ACTIVE') {
-    res.status(403).json({
+    const link = dbRes.rows[0];
+    return {
+      authUserId: verifiedUser.id,
+      marketId: link.market_id,
+      customerId: link.customer_id,
+      linkStatus: link.status,
+      customerName: link.customer_name || '',
+      marketName: link.market_name || ''
+    };
+  } catch (e) {
+    console.error('Error querying customer_auth_links in DB:', e);
+    res.status(503).json({
       status: 'error',
-      code: 'CUSTOMER_PORTAL_DENIED',
-      message: 'دەستگەیشتن بە پۆڕتاڵی کڕیار ڕەتکرایەوە - هەژماری چالاک نەدۆزرایەوە (403 Forbidden)'
+      code: 'DATABASE_ERROR',
+      message: 'خەتا لە بەستەری پۆڕتاڵی کڕیار ڕوویدا'
     });
     return null;
   }
-
-  return {
-    authUserId: link.auth_user_id,
-    marketId: link.market_id,
-    customerId: link.customer_id,
-    linkStatus: link.status,
-    customerName: link.customer_name || '',
-    marketName: link.market_name || ''
-  };
 }
 
 async function logPlatformAudit(
@@ -4370,10 +4014,10 @@ app.post('/api/markets/:market_id/employees', async (req, res) => {
   if (pool) {
     try {
       await pool.query(`
-        INSERT INTO public.users (id, auth_user_id, full_name, email, is_active, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, true, NOW(), NOW())
-        ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, email = EXCLUDED.email, updated_at = NOW();
-      `, [newUserId, newAuthUserId, full_name.trim(), `${phone.trim()}@zhirox.internal`]);
+        INSERT INTO public.users (id, auth_user_id, full_name, email, phone, is_active, created_at, updated_at)
+        VALUES ($1, NULL, $2, $3, $4, false, NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, email = EXCLUDED.email, phone = EXCLUDED.phone, updated_at = NOW();
+      `, [newUserId, full_name.trim(), `${phone.trim()}@zhirox.internal`, phone.trim()]);
 
       await pool.query(`
         INSERT INTO public.market_memberships (id, market_id, user_id, role, permissions, status, created_at, updated_at)
@@ -5141,88 +4785,117 @@ app.put('/api/platform/markets/:market_id/license', async (req, res) => {
 });
 
 // Platform Delete Market Account
+// Platform Close Market Account
 app.delete('/api/platform/markets/:market_id', async (req, res) => {
-  const { market_id } = req.params;
-
-  if (db.markets) {
-    db.markets = db.markets.filter((m: any) => m.id !== market_id);
-    saveDb(db);
+  if (!(await isActorPlatformOwner(req))) {
+    return res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - تەنها خاوەنی سیستەم ڕێگەپێدراوە' });
   }
+
+  const { market_id } = req.params;
 
   if (pool) {
     try {
-      await pool.query(`DELETE FROM public.market_memberships WHERE market_id = $1`, [market_id]);
-      await pool.query(`DELETE FROM public.ledger_entries WHERE market_id = $1`, [market_id]);
-      await pool.query(`DELETE FROM public.audit_logs WHERE market_id = $1`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_credit_settings WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_debt_controls WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.temporary_debt_unlocks WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.approval_requests WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.payment_promises WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_reminders WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_disputes WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_attachments WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_balances WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customer_auth_links WHERE customer_id IN (SELECT id FROM public.customers WHERE market_id = $1)`, [market_id]);
-      await pool.query(`DELETE FROM public.customers WHERE market_id = $1`, [market_id]);
-      await pool.query(`DELETE FROM public.markets WHERE id = $1`, [market_id]);
+      await pool.query(`
+        UPDATE public.markets
+        SET status = 'CLOSED', updated_at = NOW()
+        WHERE id = $1;
+      `, [market_id]);
+
+      await pool.query(`
+        UPDATE public.market_memberships
+        SET status = 'SUSPENDED', updated_at = NOW()
+        WHERE market_id = $1;
+      `, [market_id]);
+
+      await logPlatformAudit(market_id, 'SYSTEM', 'MARKET_CLOSED', `داخستنی مارکێت (${market_id}) و دروستنەکردنی سڕینەوەی فیزیکی داتا لەسەر داوای بەکارهێنەر`, 'PLATFORM_OWNER');
     } catch (e) {
-      console.error('Failed to delete market from Postgres:', e);
-      return res.status(500).json({ status: 'error', message: 'هەڵە لە سڕینەوەی مارکێت لە بنکەی زانیاری' });
+      console.error('Failed to close market in Postgres:', e);
+      return res.status(500).json({ status: 'error', message: 'هەڵە لە داخستنی مارکێت لە بنکەی زانیاری' });
     }
   }
 
   res.json({
     status: 'success',
-    message: 'مارکێتەکە بە سەرکەوتوویی سڕایەوە'
+    message: 'مارکێتەکە بە سەرکەوتوویی داخرا و داتاکانی لەسەر سیستەم پارێزران'
   });
 });
 
 // Platform Assign Manager/Owner to Market
 app.post('/api/platform/markets/:market_id/managers', async (req, res) => {
+  if (!(await isActorPlatformOwner(req))) {
+    return res.status(403).json({ status: 'error', message: 'دەستگەیشتن ڕەتکرایەوە - تەنها خاوەنی سیستەم ڕێگەپێدراوە' });
+  }
+
   const { market_id } = req.params;
   const { full_name, email, phone, role } = req.body;
 
-  if (!full_name) {
+  if (!full_name || typeof full_name !== 'string' || !full_name.trim()) {
     return res.status(400).json({ status: 'error', message: 'ناوی بەڕێوەبەر داواکراوە' });
   }
 
-  const userId = crypto.randomUUID();
-  const memId = `mem-${Date.now().toString(36)}`;
-  const targetRole = role === 'MARKET_OWNER' ? 'OWNER' : 'MANAGER';
-
-  if (pool) {
-    try {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN;');
-        await client.query(`
-          INSERT INTO public.users (id, auth_user_id, full_name, email, is_active, created_at, updated_at)
-          VALUES ($1, $2, $3, $4, true, NOW(), NOW())
-          ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, email = EXCLUDED.email, updated_at = NOW();
-        `, [userId, userId, full_name, email || `${userId}@zhirox.com`]);
-
-        await client.query(`
-          INSERT INTO public.market_memberships (id, market_id, user_id, role, permissions, status, created_at, updated_at)
-          VALUES ($1, $2, $3, $4, '["all"]'::jsonb, 'ACTIVE', NOW(), NOW())
-          ON CONFLICT DO NOTHING;
-        `, [memId, market_id, userId, targetRole]);
-
-        await client.query('COMMIT;');
-      } catch (err) {
-        await client.query('ROLLBACK;');
-      } finally {
-        client.release();
-      }
-    } catch (e) {
-      console.error('Failed adding manager:', e);
-    }
+  if (!pool) {
+    return res.status(503).json({ status: 'error', message: 'بنکەی زانیاری دەستنەکەوت' });
   }
 
-  res.json({
-    status: 'success',
-    message: `بەڕێوەبەری نوێ (${full_name}) دانرا بە سەرکەوتوویی!`
-  });
+  const userId = crypto.randomUUID();
+  const memId = `mem-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+  const targetRole = role === 'MARKET_OWNER' ? 'OWNER' : 'MANAGER';
+
+  const rawActivationToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawActivationToken).digest('hex');
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN;');
+
+    // 1. Insert staged user with auth_user_id NULL and is_active false
+    await client.query(`
+      INSERT INTO public.users (id, auth_user_id, full_name, email, phone, is_active, created_at, updated_at)
+      VALUES ($1, NULL, $2, $3, $4, false, NOW(), NOW())
+      ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name, email = EXCLUDED.email, phone = EXCLUDED.phone, updated_at = NOW();
+    `, [userId, full_name.trim(), email || `user-${userId}@zhirox.internal`, phone ? phone.trim() : null]);
+
+    // 2. Insert market membership with PENDING_ACTIVATION status
+    await client.query(`
+      INSERT INTO public.market_memberships (id, market_id, user_id, role, permissions, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, '["ALL"]'::jsonb, 'PENDING_ACTIVATION', NOW(), NOW());
+    `, [memId, market_id, userId, targetRole]);
+
+    // 3. Store activation token in DB
+    const tokenId = `act-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+    await client.query(`
+      INSERT INTO public.activation_tokens (id, token_hash, market_id, market_name, user_id, manager_name, manager_login_phone, status, expires_at, created_at)
+      VALUES ($1, $2, $3, 'Market', $4, $5, $6, 'READY', $7, NOW());
+    `, [tokenId, tokenHash, market_id, userId, full_name.trim(), phone ? phone.trim() : '', expiresAt]);
+
+    await client.query('COMMIT;');
+
+    const baseUrl = getBaseUrlFromReq(req);
+    const activationUrl = `${baseUrl}/activate/manager?token=${rawActivationToken}`;
+
+    await logPlatformAudit(market_id, userId, 'MANAGER_PROVISIONED', `بەڕێوەبەری نوێ (${full_name.trim()}) دیاری کرا بە بەستەری چالاککردنەوە`, 'PLATFORM_OWNER');
+
+    return res.status(201).json({
+      status: 'success',
+      message: `بەڕێوەبەری نوێ (${full_name.trim()}) زیادکرا و لینکی چالاککردنەوە ئامادە کرا`,
+      data: {
+        user_id: userId,
+        full_name: full_name.trim(),
+        role: targetRole,
+        status: 'PENDING_ACTIVATION',
+        activation_token: rawActivationToken,
+        activation_url: activationUrl,
+        expires_at: expiresAt
+      }
+    });
+  } catch (err) {
+    await client.query('ROLLBACK;');
+    console.error('Failed adding manager in DB transaction:', err);
+    return res.status(500).json({ status: 'error', message: 'خەتای تۆمارکردنی بەڕێوەبەر لە بنکەی زانیاری' });
+  } finally {
+    client.release();
+  }
 });
 
 // Platform Get All Managers
