@@ -167,7 +167,7 @@ export const StaffManagementModal: React.FC<StaffManagementModalProps> = ({ isOp
   const [searchQuery, setSearchQuery] = useState('');
 
   // Active Market Context
-  const [activeMarketId, setActiveMarketId] = useState<string>('mkt-default');
+  const [activeMarketId, setActiveMarketId] = useState<string>('');
   const [isManagerAuthorized, setIsManagerAuthorized] = useState<boolean>(true);
 
   // Selected Employee Detail state
@@ -234,7 +234,7 @@ export const StaffManagementModal: React.FC<StaffManagementModalProps> = ({ isOp
 
   const fetchEmployees = async (overrideMarketId?: string) => {
     let mktId = overrideMarketId || activeMarketId;
-    if (!mktId || mktId === 'SYSTEM_GLOBAL' || mktId === 'mkt-default') {
+    if (!mktId || mktId === 'SYSTEM_GLOBAL') {
       setIsLoading(false);
       return;
     }

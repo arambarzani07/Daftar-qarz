@@ -455,7 +455,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         id: u.id,
         name: u.full_name || '',
         phone: u.phone || '',
-        role: u.id === 'usr-platform-owner' ? 'PLATFORM_OWNER' : 'MARKET_MANAGER',
+        role: resPlatform.rows.some(pa => pa.user_id === u.id && pa.role === 'PLATFORM_OWNER' && pa.status === 'ACTIVE') ? 'PLATFORM_OWNER' : 'MARKET_MANAGER',
         status: u.is_active !== false ? 'ACTIVE' : 'INACTIVE',
         permissions: [],
         created_at: u.created_at?.toISOString ? u.created_at.toISOString() : new Date().toISOString()
@@ -1065,11 +1065,6 @@ function normalizePhone(p: string): string {
   return cleaned;
 }
 
-// Legacy findSystemUser removed per Gate 1 & Gate 2 (Supabase Auth & PostgreSQL are sole authorities)
-function findSystemUser(_identity: string): SystemUser | undefined {
-  return undefined;
-}
-
 // Helper functions for immutable balance calculation
 function calculateCustomerBalances(customerId: string) {
   const customerTxs = db.transactions.filter(
@@ -1358,7 +1353,8 @@ app.use('/api/*', async (req, res, next) => {
           message: 'دەستگەیشتن ڕەتکرایەوە - خاوەنی سیستەم تەنها مافی بەڕێوەبردنی سەرەکی (Control Plane) هەیە و مافی بینینی زانیارییە دارایی و کڕیارەکانی مارکێتی نییە (403 Forbidden)'
         });
       }
-      return res.status(403).json({
+      const statusCode = tenantCheck.code === 'UNAUTHORIZED' ? 401 : 403;
+      return res.status(statusCode).json({
         status: 'error',
         code: tenantCheck.code || 'ACCESS_DENIED',
         message: tenantCheck.message || 'دەستگەیشتن ڕەتکرایەوە'
@@ -2933,7 +2929,7 @@ export async function resolveAuthContext(verifiedSupabaseUid: string): Promise<A
   };
 }
 
-// Step 1: Identify phone/email against PostgreSQL users or customer_auth_links
+// Step 1: Identify phone/email (Generic non-enumerating endpoint)
 app.post('/api/auth/identify', async (req, res) => {
   const { identity } = req.body;
   if (!identity || typeof identity !== 'string') {
@@ -2944,68 +2940,13 @@ app.post('/api/auth/identify', async (req, res) => {
   }
 
   const trimmed = identity.trim();
-
-  if (!pool) {
-    return res.status(503).json({
-      status: 'error',
-      code: 'DATABASE_UNAVAILABLE',
-      message: 'بنکەی زانیاری دەستنەکەوت'
-    });
-  }
-
-  try {
-    const userCheck = await pool.query(`
-      SELECT full_name, is_active FROM public.users
-      WHERE (phone = $1 OR email = $1 OR email = $2)
-    `, [trimmed, `${trimmed}@zhirox.com`]);
-
-    if (userCheck.rows.length > 0) {
-      const u = userCheck.rows[0];
-      if (!u.is_active) {
-        return res.status(403).json({
-          status: 'error',
-          code: 'ACCOUNT_DISABLED',
-          message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
-        });
-      }
-      return res.json({
-        status: 'success',
-        data: {
-          identity: trimmed,
-          userName: u.full_name,
-          auth_method: 'PASSWORD'
-        }
-      });
+  return res.json({
+    status: 'success',
+    data: {
+      identity: trimmed,
+      auth_method: 'PASSWORD'
     }
-
-    const calCheck = await pool.query(`
-      SELECT c.name, cal.status
-      FROM public.customer_auth_links cal
-      JOIN public.customers c ON c.id = cal.customer_id AND c.market_id = cal.market_id
-      WHERE (c.phone = $1 OR c.address = $1)
-    `, [trimmed]);
-
-    if (calCheck.rows.length > 0) {
-      return res.json({
-        status: 'success',
-        data: {
-          identity: trimmed,
-          userName: calCheck.rows[0].name,
-          auth_method: 'PASSWORD',
-          is_customer: true
-        }
-      });
-    }
-
-    return res.status(401).json({
-      status: 'error',
-      code: 'NOT_AUTHORIZED_BY_OWNER',
-      message: 'ئەم ژمارە مۆبایلە لە لایەن خاوەنی سیستەمەوە یان کڕیارەکان ڕێگەپێنەدراوە.'
-    });
-  } catch (err) {
-    console.error('Error during auth identify:', err);
-    return res.status(500).json({ status: 'error', message: 'خەتای سێرڤەر' });
-  }
+  });
 });
 
 // Helper to check foreign market authorization
@@ -3614,12 +3555,13 @@ app.get('/api/markets/:market_id/employees', async (req, res) => {
   const { market_id } = req.params;
   const actorCheck = await verifyTenantActor(req);
   if (!actorCheck.authorized) {
-    return res.status(403).json({ status: 'error', code: actorCheck.code || 'ACCESS_DENIED', message: actorCheck.message || 'دەستگەیشتن ڕەتکرایەوە' });
+    const status = actorCheck.code === 'UNAUTHORIZED' ? 401 : 403;
+    return res.status(status).json({ status: 'error', code: actorCheck.code || 'ACCESS_DENIED', message: actorCheck.message || 'دەستگەیشتن ڕەتکرایەوە' });
   }
 
-  let targetMarketId = market_id;
-  if (!targetMarketId || targetMarketId === 'SYSTEM_GLOBAL' || targetMarketId === 'mkt-default' || targetMarketId === 'zhirox-market-erbil') {
-    targetMarketId = actorCheck.marketId || 'market-mrx3a7x4';
+  let targetMarketId = actorCheck.marketId || market_id;
+  if (!targetMarketId || targetMarketId === 'SYSTEM_GLOBAL') {
+    return res.status(400).json({ status: 'error', message: 'مارکێت دیاری نەکراوە' });
   }
 
   if (pool) {
@@ -3643,30 +3585,10 @@ app.get('/api/markets/:market_id/employees', async (req, res) => {
         FROM public.market_memberships mm
         JOIN public.users u ON u.id = mm.user_id
         LEFT JOIN public.activation_tokens at ON at.user_id = u.id AND at.status = 'READY'
-        WHERE mm.role = 'EMPLOYEE'
+        WHERE mm.role = 'EMPLOYEE' AND mm.market_id = $1
+        ORDER BY mm.created_at DESC
       `;
-      let queryParams: any[] = [];
-      if (market_id !== 'SYSTEM_GLOBAL' && targetMarketId !== 'SYSTEM_GLOBAL') {
-        queryStr += ` AND mm.market_id = $1`;
-        queryParams.push(targetMarketId);
-      }
-      queryStr += ` ORDER BY mm.created_at DESC`;
-
-      let dbRes = await pool.query(queryStr, queryParams);
-
-      if (dbRes.rows.length === 0 && (market_id === 'SYSTEM_GLOBAL' || market_id === 'mkt-default' || market_id === 'zhirox-market-erbil')) {
-        dbRes = await pool.query(`
-          SELECT 
-            u.id as user_id, u.auth_user_id, u.full_name, u.email, u.phone,
-            mm.id as membership_id, mm.market_id, mm.role, mm.permissions, mm.status, mm.created_at, mm.updated_at,
-            at.id as activation_token_id, at.expires_at as activation_expires_at
-          FROM public.market_memberships mm
-          JOIN public.users u ON u.id = mm.user_id
-          LEFT JOIN public.activation_tokens at ON at.user_id = u.id AND at.status = 'READY'
-          WHERE mm.role = 'EMPLOYEE'
-          ORDER BY mm.created_at DESC
-        `);
-      }
+      let dbRes = await pool.query(queryStr, [targetMarketId]);
 
       const employees = dbRes.rows.map(row => {
         let perms: string[] = [];
@@ -3712,9 +3634,9 @@ app.post('/api/markets/:market_id/employees', async (req, res) => {
     return res.status(403).json({ status: 'error', code: actorCheck.code || 'ACCESS_DENIED', message: actorCheck.message || 'دەستگەیشتن ڕەتکرایەوە' });
   }
 
-  let targetMarketId = market_id;
-  if (!targetMarketId || targetMarketId === 'SYSTEM_GLOBAL' || targetMarketId === 'mkt-default' || targetMarketId === 'zhirox-market-erbil') {
-    targetMarketId = actorCheck.marketId || 'market-mrx3a7x4';
+  let targetMarketId = actorCheck.marketId || market_id;
+  if (!targetMarketId || targetMarketId === 'SYSTEM_GLOBAL') {
+    return res.status(400).json({ status: 'error', message: 'مارکێت دیاری نەکراوە' });
   }
 
   const { full_name, phone, initial_permissions } = req.body;
