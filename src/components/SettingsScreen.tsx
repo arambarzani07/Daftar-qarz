@@ -833,16 +833,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
               <ChevronRight className="w-4 h-4 rotate-180" />
             </a>
 
-            <a
-              href="tel:+9647501234567"
-              className="w-full p-3.5 bg-black border border-[#2C2C2E] text-[#F5F5F7] rounded-xl font-bold text-sm flex items-center justify-between active-scale"
+            <div
+              className="w-full p-3.5 bg-black border border-[#2C2C2E] text-[#F5F5F7] rounded-xl font-bold text-sm flex items-center justify-between"
             >
               <div className="flex items-center gap-2.5">
                 <Phone className="w-5 h-5 text-emerald-400" />
-                <span>پەیوەندی تەلەفۆنی: 07501234567</span>
+                <span>پشتیوانی تەلەفۆنی ژیرۆکس</span>
               </div>
-              <ChevronRight className="w-4 h-4 rotate-180" />
-            </a>
+            </div>
           </div>
         </div>
       )}

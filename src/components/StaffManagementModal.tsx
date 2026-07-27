@@ -235,7 +235,8 @@ export const StaffManagementModal: React.FC<StaffManagementModalProps> = ({ isOp
   const fetchEmployees = async (overrideMarketId?: string) => {
     let mktId = overrideMarketId || activeMarketId;
     if (!mktId || mktId === 'SYSTEM_GLOBAL' || mktId === 'mkt-default') {
-      mktId = 'zhirox-market-erbil';
+      setIsLoading(false);
+      return;
     }
     setIsLoading(true);
     setErrorMessage(null);

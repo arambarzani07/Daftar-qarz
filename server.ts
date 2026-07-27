@@ -13,7 +13,7 @@ export const dbStorage = new AsyncLocalStorage<ZhiroxDatabase>();
 const app = express();
 const PORT = 3000;
 
-export const DEFAULT_MARKET_ID = 'mkt-default';
+export const CANONICAL_MARKET_ROLE = 'MARKET_MANAGER';
 
 app.use(express.json());
 
@@ -348,9 +348,9 @@ export const db = new Proxy({} as ZhiroxDatabase, {
         targetObj[prop] = {
           market_name: 'سیستەمی سەرەکی ژیرۆکس',
           owner_name: 'خاوەنی سیستەم',
-          market_id: DEFAULT_MARKET_ID,
+          market_id: '',
           pin_enabled: false,
-          pin_code: '1234',
+          pin_code: '',
           language: 'ku',
           default_currency: 'IQD',
           theme: 'dark'
@@ -601,7 +601,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       data.payment_promises = resPromises.rows.map(p => ({
         id: p.id,
         customer_id: p.customer_id,
-        market_id: p.market_id || DEFAULT_MARKET_ID,
+        market_id: p.market_id || '',
         amount: Number(p.promised_amount || 0),
         currency: p.currency || 'IQD',
         promised_date: p.promise_date?.toISOString ? p.promise_date.toISOString() : p.promise_date,
@@ -615,7 +615,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       data.reminders = resReminders.rows.map(r => ({
         id: r.id,
         customer_id: r.customer_id,
-        market_id: r.market_id || DEFAULT_MARKET_ID,
+        market_id: r.market_id || '',
         follow_up_date: r.remind_at?.toISOString ? r.remind_at.toISOString() : r.remind_at,
         reason: r.note || '',
         status: r.status,
@@ -626,7 +626,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       data.attachments = resAttachments.rows.map(a => ({
         id: a.id,
         customer_id: a.customer_id,
-        market_id: a.market_id || DEFAULT_MARKET_ID,
+        market_id: a.market_id || '',
         file_name: a.file_name,
         file_type: a.mime_type || 'application/octet-stream',
         file_data_url: a.storage_path || '',
@@ -638,7 +638,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       data.disputes = resDisputes.rows.map(d => ({
         id: d.id,
         customer_id: d.customer_id,
-        market_id: d.market_id || DEFAULT_MARKET_ID,
+        market_id: d.market_id || '',
         title: d.reason ? d.reason.split(':')[0] : '',
         description: d.reason ? d.reason.split(':').slice(1).join(':').trim() : '',
         status: d.status,
@@ -658,32 +658,32 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       }));
 
       // Map market settings
-      const globalSettings = (requestedMarketId && resSettings.rows.find(s => s.market_id === requestedMarketId)) || resSettings.rows.find(s => s.market_id === DEFAULT_MARKET_ID) || resSettings.rows[0];
+      const globalSettings = (requestedMarketId && resSettings.rows.find(s => s.market_id === requestedMarketId)) || resSettings.rows[0];
       
-      const activeMktId = requestedMarketId || DEFAULT_MARKET_ID;
-      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && (mm.role === 'OWNER' || mm.role === 'MARKET_OWNER'));
+      const activeMktId = requestedMarketId || '';
+      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && (mm.role === 'OWNER' || mm.role === 'MARKET_OWNER' || mm.role === 'MARKET_MANAGER'));
       const ownerUsrForActive = ownerMemForActive ? resUsers.rows.find(u => u.id === ownerMemForActive.user_id) : null;
 
       if (globalSettings) {
         data.settings = {
-          market_name: globalSettings.market_name || 'ژیڕۆکس مۆڵ (Erbil)',
-          owner_name: globalSettings.owner_name || ownerUsrForActive?.full_name || 'کاک کاوان',
-          owner_phone: globalSettings.owner_phone || ownerUsrForActive?.phone || '07501234567',
-          market_id: globalSettings.market_id || requestedMarketId || DEFAULT_MARKET_ID,
+          market_name: globalSettings.market_name || '',
+          owner_name: globalSettings.owner_name || ownerUsrForActive?.full_name || '',
+          owner_phone: globalSettings.owner_phone || ownerUsrForActive?.phone || '',
+          market_id: globalSettings.market_id || requestedMarketId || '',
           pin_enabled: globalSettings.pin_enabled || false,
-          pin_code: globalSettings.pin_code || '1234',
+          pin_code: globalSettings.pin_code || '',
           language: globalSettings.language || 'ku',
           default_currency: globalSettings.default_currency || 'IQD',
           theme: globalSettings.theme || 'dark'
         };
       } else {
         data.settings = {
-          market_name: 'ژیڕۆکس مۆڵ (Erbil)',
-          owner_name: ownerUsrForActive?.full_name || 'کاک کاوان',
-          owner_phone: ownerUsrForActive?.phone || '07501234567',
+          market_name: '',
+          owner_name: ownerUsrForActive?.full_name || '',
+          owner_phone: ownerUsrForActive?.phone || '',
           market_id: activeMktId,
           pin_enabled: false,
-          pin_code: '1234',
+          pin_code: '',
           language: 'ku',
           default_currency: 'IQD',
           theme: 'dark'
@@ -717,7 +717,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           phone = EXCLUDED.phone,
           notes = EXCLUDED.notes,
           updated_at = NOW();
-      `, [c.id, c.market_id || DEFAULT_MARKET_ID, c.seq_num || 1, c.name, c.latin_name || null, c.phone || null, c.notes || null]);
+      `, [c.id, c.market_id || '', c.seq_num || 1, c.name, c.latin_name || null, c.phone || null, c.notes || null]);
     }
 
     // 2. Save Ledger Entries
@@ -733,7 +733,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           reversed_by = EXCLUDED.reversed_by;
       `, [
         t.id,
-        t.market_id || DEFAULT_MARKET_ID,
+        t.market_id || '',
         t.customer_id,
         t.currency || 'IQD',
         t.type === 'DEBT_ADD' ? 'DEBT_ADD' : 'PAYMENT_RECEIVE',
@@ -759,7 +759,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         `cs-${cs.customer_id}-IQD`,
-        data.settings.market_id || DEFAULT_MARKET_ID,
+        data.settings.market_id || '',
         cs.customer_id,
         cs.limit_iqd > 0 ? 'HARD_LIMIT' : 'NO_LIMIT',
         cs.limit_iqd
@@ -775,7 +775,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         `cs-${cs.customer_id}-USD`,
-        data.settings.market_id || DEFAULT_MARKET_ID,
+        data.settings.market_id || '',
         cs.customer_id,
         cs.limit_usd > 0 ? 'HARD_LIMIT' : 'NO_LIMIT',
         cs.limit_usd
@@ -790,7 +790,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           changed_at = NOW();
       `, [
         `dc-${cs.customer_id}`,
-        data.settings.market_id || DEFAULT_MARKET_ID,
+        data.settings.market_id || '',
         cs.customer_id,
         cs.lock_status === 'LOCKED' ? 'LOCKED' : 'ACTIVE'
       ]);
@@ -810,7 +810,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         sl.id,
-        sl.market_id || DEFAULT_MARKET_ID,
+        sl.market_id || '',
         sl.customer_id,
         sl.token,
         sl.status,
@@ -831,7 +831,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           note = EXCLUDED.note;
       `, [
         p.id,
-        p.market_id || DEFAULT_MARKET_ID,
+        p.market_id || '',
         p.customer_id,
         p.currency || 'IQD',
         p.amount,
@@ -852,7 +852,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           note = EXCLUDED.note;
       `, [
         r.id,
-        r.market_id || DEFAULT_MARKET_ID,
+        r.market_id || '',
         r.customer_id,
         r.follow_up_date ? new Date(r.follow_up_date) : new Date(),
         r.reason || null,
@@ -869,7 +869,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
         ON CONFLICT (id) DO NOTHING;
       `, [
         a.id,
-        a.market_id || DEFAULT_MARKET_ID,
+        a.market_id || '',
         a.customer_id,
         a.file_name,
         100, // file size placeholder
@@ -889,7 +889,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           status = EXCLUDED.status;
       `, [
         d.id,
-        data.settings.market_id || DEFAULT_MARKET_ID,
+        data.settings.market_id || '',
         d.customer_id,
         d.title ? `${d.title}: ${d.description || ''}` : (d.description || ''),
         d.status,
@@ -908,7 +908,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           ON CONFLICT (id) DO NOTHING;
         `, [
           al.id,
-          al.market_id || DEFAULT_MARKET_ID,
+          al.market_id || '',
           al.customer_id || null,
           al.action_type,
           al.description,
@@ -938,12 +938,12 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
         theme = EXCLUDED.theme,
         updated_at = NOW();
     `, [
-      data.settings.market_id || DEFAULT_MARKET_ID,
+      data.settings.market_id || '',
       data.settings.market_name,
       data.settings.owner_name,
       data.settings.owner_phone || null,
       data.settings.pin_enabled || false,
-      data.settings.pin_code || '1234',
+      data.settings.pin_code || '',
       data.settings.language || 'ku',
       data.settings.default_currency || 'IQD',
       data.settings.theme || 'dark'
@@ -964,6 +964,43 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
   } catch (err) {
     console.error('Failed to rebuild customer balances cache table:', err);
   }
+}
+
+export async function updateCustomerBalanceForCurrency(marketId: string, customerId: string, currency: string, dbClient?: pg.PoolClient) {
+  if (!pool && !dbClient) return;
+  const exec = dbClient || pool;
+  
+  const res = await exec!.query(`
+    SELECT 
+      SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE -amount END) as net_balance,
+      SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE 0 END) as total_debt,
+      SUM(CASE WHEN entry_type = 'PAYMENT_RECEIVE' THEN amount ELSE 0 END) as total_payments,
+      COUNT(*) as tx_count,
+      MAX(occurred_at) as last_tx_at
+    FROM public.ledger_entries
+    WHERE market_id = $1 AND customer_id = $2 AND currency = $3 AND is_reversed = false
+  `, [marketId, customerId, currency]);
+
+  const row = res.rows[0];
+  const netBalance = Number(row?.net_balance || 0);
+  const totalDebt = Number(row?.total_debt || 0);
+  const totalPayments = Number(row?.total_payments || 0);
+  const txCount = Number(row?.tx_count || 0);
+  const lastTxAt = row?.last_tx_at ? new Date(row.last_tx_at) : null;
+  const balanceId = `bal-${customerId}-${currency}`;
+
+  await exec!.query(`
+    INSERT INTO public.customer_balances (
+      id, market_id, customer_id, currency, balance, total_debt_added, total_payments_received, transaction_count, last_transaction_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+    ON CONFLICT (market_id, customer_id, currency) DO UPDATE SET
+      balance = EXCLUDED.balance,
+      total_debt_added = EXCLUDED.total_debt_added,
+      total_payments_received = EXCLUDED.total_payments_received,
+      transaction_count = EXCLUDED.transaction_count,
+      last_transaction_at = EXCLUDED.last_transaction_at,
+      updated_at = NOW()
+  `, [balanceId, marketId, customerId, currency, netBalance, totalDebt, totalPayments, txCount, lastTxAt]);
 }
 
 export async function rebuildCustomerBalances() {
@@ -1158,6 +1195,10 @@ function computeRiskAssessment(customerId: string): RiskAssessment {
 }
 
 function getMarketId(req: express.Request): string {
+  const paramMarket = req.params?.market_id as string;
+  if (paramMarket && paramMarket !== 'SYSTEM_GLOBAL') {
+    return paramMarket;
+  }
   const headerMarket = (req.headers['x-market-id'] as string) || (req.headers['x-tenant-id'] as string) || (req.headers['x-active-tenant-id'] as string);
   if (headerMarket && headerMarket !== 'SYSTEM_GLOBAL') {
     return headerMarket;
@@ -1170,7 +1211,7 @@ function getMarketId(req: express.Request): string {
   if (bodyMarket && bodyMarket !== 'SYSTEM_GLOBAL') {
     return bodyMarket;
   }
-  return db.settings.market_id || DEFAULT_MARKET_ID;
+  return '';
 }
 
 function calculateMarketTotal(marketId: string) {
@@ -2964,8 +3005,8 @@ app.post('/api/auth/login', async (req, res) => {
               permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
             } : {
               context_id: row.membership_id || ('ctx-' + row.user_id),
-              tenant_id: row.market_id || DEFAULT_MARKET_ID,
-              tenant_name: row.market_name || (db.settings.market_name || 'سوپەرمارکێتی ژیرۆکس'),
+              tenant_id: row.market_id || '',
+              tenant_name: row.market_name || 'سوپەرمارکێتی ژیرۆکس',
               role: row.role || 'MANAGER',
               role_label_ku: row.role === 'OWNER' ? 'خاوەن شوێن' : 'بەڕێوەبەر',
               permissions: ['ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER']
@@ -3005,9 +3046,9 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    let isPlatformOwner = user.role === 'PLATFORM_OWNER' || user.id === 'usr-103' || user.id === 'usr-platform-owner';
+    let isPlatformOwner = user.role === 'PLATFORM_OWNER';
     if (!isPlatformOwner && db.platform_access && db.users) {
-      isPlatformOwner = db.platform_access.some(p => (p.user_id === user.id || p.user_id === 'usr-platform-owner') && p.role === 'PLATFORM_OWNER' && p.status === 'ACTIVE');
+      isPlatformOwner = db.platform_access.some(p => p.user_id === user.id && p.role === 'PLATFORM_OWNER' && p.status === 'ACTIVE');
     }
 
     return res.json({
@@ -3029,8 +3070,8 @@ app.post('/api/auth/login', async (req, res) => {
           if (!assignedMarket && db.markets?.length > 0) {
             assignedMarket = db.markets.find((m: any) => m.owner_phone && user.phone && m.owner_phone.trim() === user.phone.trim()) || db.markets[0];
           }
-          const tenantId = assignedMarket ? assignedMarket.id : DEFAULT_MARKET_ID;
-          const tenantName = assignedMarket ? assignedMarket.name : (db.settings.market_name || 'سوپەرمارکێتی ژیرۆکس');
+          const tenantId = assignedMarket ? assignedMarket.id : '';
+          const tenantName = assignedMarket ? assignedMarket.name : 'سوپەرمارکێتی ژیرۆکس';
           return {
             context_id: 'ctx-' + user.id,
             tenant_id: tenantId,

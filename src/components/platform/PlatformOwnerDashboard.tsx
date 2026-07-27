@@ -37,7 +37,7 @@ interface PlatformOwnerDashboardProps {
 
 export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
   onLogout,
-  currentIdentity = '07500000000'
+  currentIdentity = ''
 }) => {
   const [activeTab, setActiveTab] = useState<'ACCOUNT_OPERATIONS' | 'MARKETS' | 'MANAGERS'>('ACCOUNT_OPERATIONS');
   const [loading, setLoading] = useState(true);

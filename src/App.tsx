@@ -301,7 +301,7 @@ export default function App() {
     }
 
     if (!marketId && authState.activeContext?.role !== 'PLATFORM_OWNER') {
-      marketId = 'zhirox-market-erbil';
+      marketId = '';
     }
 
     const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
@@ -634,7 +634,7 @@ export default function App() {
       <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] font-sans antialiased flex flex-col">
         <PlatformOwnerDashboard
           onLogout={signOut}
-          currentIdentity={authState.identity || 'admin@zhirox.com'}
+          currentIdentity={authState.identity || ''}
         />
       </div>
     );

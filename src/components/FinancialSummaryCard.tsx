@@ -37,11 +37,11 @@ export const FinancialSummaryCard: React.FC<FinancialSummaryCardProps> = ({
       try {
         const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
         const activeCtxStr = typeof window !== 'undefined' ? localStorage.getItem('zhirox_active_context') : null;
-        let marketId = 'zhirox-market-erbil';
+        let marketId = '';
         if (activeCtxStr) {
           try {
             const parsed = JSON.parse(activeCtxStr);
-            marketId = parsed.tenant_id || parsed.market_id || marketId;
+            marketId = parsed.tenant_id || parsed.market_id || '';
           } catch (e) {}
         }
         const headers: Record<string, string> = {
