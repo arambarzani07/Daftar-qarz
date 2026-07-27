@@ -959,15 +959,90 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
   }
 }
 
+export function validateFinancialAmountAndCurrency(rawAmount: any, rawCurrency: any): {
+  valid: boolean;
+  amount: number;
+  currency: 'IQD' | 'USD';
+  error?: string;
+} {
+  const currencyStr = String(rawCurrency || '').trim().toUpperCase();
+  if (currencyStr !== 'IQD' && currencyStr !== 'USD') {
+    return { valid: false, amount: 0, currency: 'IQD', error: 'دراو دەبێت دینار (IQD) یان دۆلار (USD) بێت' };
+  }
+  const currency = currencyStr as 'IQD' | 'USD';
+
+  if (typeof rawAmount === 'boolean' || rawAmount === null || rawAmount === undefined) {
+    return { valid: false, amount: 0, currency, error: 'بڕی پارە دیاری نەکراوە' };
+  }
+
+  const numAmount = Number(rawAmount);
+  if (isNaN(numAmount) || !isFinite(numAmount) || numAmount <= 0) {
+    return { valid: false, amount: 0, currency, error: 'بڕی پارە دەبێت ژمارەیەکی دروست و ئەرێنی بێت' };
+  }
+
+  if (currency === 'IQD') {
+    if (!Number.isInteger(numAmount)) {
+      return { valid: false, amount: 0, currency, error: 'بڕی پارەی دینار دەبێت ژمارەیەکی تەواو بێت (بێ فاریزە)' };
+    }
+  } else if (currency === 'USD') {
+    const decStr = rawAmount.toString().split('.')[1] || '';
+    if (decStr.length > 2) {
+      return { valid: false, amount: 0, currency, error: 'بڕی پارەی دۆلار نابێت لە ۲ فاریزە زیاتر بێت' };
+    }
+  }
+
+  return { valid: true, amount: numAmount, currency };
+}
+
+export async function checkOverpaymentPolicy(
+  client: pg.PoolClient,
+  marketId: string,
+  customerId: string,
+  currency: 'IQD' | 'USD',
+  paymentAmount: number
+): Promise<{ allowed: boolean; currentDebt: number; message?: string }> {
+  const res = await client.query(`
+    SELECT COALESCE(SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE -amount END), 0) as current_debt
+    FROM public.ledger_entries
+    WHERE market_id = $1 AND customer_id = $2 AND currency = $3 AND is_reversed = false
+  `, [marketId, customerId, currency]);
+
+  const currentDebt = Number(res.rows[0]?.current_debt || 0);
+  if (paymentAmount > currentDebt) {
+    return {
+      allowed: false,
+      currentDebt,
+      message: `بڕی وەرگیراو (${paymentAmount.toLocaleString()} ${currency}) لە بڕی قەرزی ئێستای کڕیار (${currentDebt.toLocaleString()} ${currency}) زیاترە`
+    };
+  }
+
+  return { allowed: true, currentDebt };
+}
+
+export async function findExistingIdempotentTransaction(
+  client: pg.PoolClient,
+  marketId: string,
+  idempotencyKey: string
+): Promise<any | null> {
+  const res = await client.query(`
+    SELECT * FROM public.ledger_entries WHERE market_id = $1 AND idempotency_key = $2
+  `, [marketId, idempotencyKey]);
+
+  if (res.rows.length > 0) {
+    return res.rows[0];
+  }
+  return null;
+}
+
 export async function updateCustomerBalanceForCurrency(marketId: string, customerId: string, currency: string, dbClient?: pg.PoolClient) {
   if (!pool && !dbClient) return;
   const exec = dbClient || pool;
   
   const res = await exec!.query(`
     SELECT 
-      SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE -amount END) as net_balance,
-      SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE 0 END) as total_debt,
-      SUM(CASE WHEN entry_type = 'PAYMENT_RECEIVE' THEN amount ELSE 0 END) as total_payments,
+      SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE -amount END) as net_balance,
+      SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE 0 END) as total_debt,
+      SUM(CASE WHEN entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT') THEN amount ELSE 0 END) as total_payments,
       COUNT(*) as tx_count,
       MAX(occurred_at) as last_tx_at
     FROM public.ledger_entries
@@ -996,6 +1071,43 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
   `, [balanceId, marketId, customerId, currency, netBalance, totalDebt, totalPayments, txCount, lastTxAt]);
 }
 
+export async function rebuildCustomerBalance(
+  marketId: string,
+  customerId: string,
+  currency: string,
+  dbClient?: pg.PoolClient
+) {
+  await updateCustomerBalanceForCurrency(marketId, customerId, currency, dbClient);
+}
+
+export async function checkBalanceDrift(
+  marketId: string,
+  customerId: string,
+  currency: string
+): Promise<{ hasDrift: boolean; cachedBalance: number; calculatedBalance: number }> {
+  if (!pool) return { hasDrift: false, cachedBalance: 0, calculatedBalance: 0 };
+  
+  const client = await pool.connect();
+  try {
+    const cachedRes = await client.query(`
+      SELECT balance FROM public.customer_balances WHERE market_id = $1 AND customer_id = $2 AND currency = $3
+    `, [marketId, customerId, currency]);
+    const cachedBalance = Number(cachedRes.rows[0]?.balance || 0);
+
+    const calcRes = await client.query(`
+      SELECT COALESCE(SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE -amount END), 0) as calc_balance
+      FROM public.ledger_entries
+      WHERE market_id = $1 AND customer_id = $2 AND currency = $3 AND is_reversed = false
+    `, [marketId, customerId, currency]);
+    const calculatedBalance = Number(calcRes.rows[0]?.calc_balance || 0);
+
+    const hasDrift = cachedBalance !== calculatedBalance;
+    return { hasDrift, cachedBalance, calculatedBalance };
+  } finally {
+    client.release();
+  }
+}
+
 export async function rebuildCustomerBalances() {
   if (!pool) return;
   const client = await pool.connect();
@@ -1008,9 +1120,9 @@ export async function rebuildCustomerBalances() {
         customer_id,
         market_id,
         currency,
-        SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE -amount END) as net_balance,
-        SUM(CASE WHEN entry_type = 'DEBT_ADD' THEN amount ELSE 0 END) as total_debt,
-        SUM(CASE WHEN entry_type = 'PAYMENT_RECEIVE' THEN amount ELSE 0 END) as total_payments,
+        SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE -amount END) as net_balance,
+        SUM(CASE WHEN entry_type IN ('DEBT_ADD', 'OPENING_BALANCE') THEN amount ELSE 0 END) as total_debt,
+        SUM(CASE WHEN entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT') THEN amount ELSE 0 END) as total_payments,
         COUNT(*) as tx_count,
         MAX(occurred_at) as last_tx_at
       FROM public.ledger_entries
@@ -1075,8 +1187,8 @@ function calculateCustomerBalances(customerId: string) {
   let usd = 0;
 
   for (const t of customerTxs) {
-    const isDebt = t.type === 'DEBT_ADD';
-    const isPay = t.type === 'PAYMENT_RECEIVE';
+    const isDebt = t.type === 'DEBT_ADD' || (t.type as string) === 'OPENING_BALANCE';
+    const isPay = t.type === 'PAYMENT_RECEIVE' || (t.type as string) === 'FORGIVENESS' || (t.type as string) === 'ADJUSTMENT';
     const mult = isDebt ? 1 : isPay ? -1 : 0;
 
     if (t.currency === 'USD') {
@@ -1543,7 +1655,7 @@ app.post('/api/customers', async (req, res) => {
   if (!permCheck.authorized) return;
 
   const marketId = getMarketId(req);
-  const { name, latin_name, phone, password, currency, notes } = req.body;
+  const { name, latin_name, phone, password, currency, notes, opening_balance, opening_balance_iqd, opening_balance_usd } = req.body;
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ status: 'error', message: 'ناوی قەرزدار پێویستە' });
@@ -1555,32 +1667,112 @@ app.post('/api/customers', async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'وشەی نهێنی بۆ کڕیار پێویستە و زۆرەملێیە' });
   }
 
-  const seq_num = db.customers.length > 0 ? Math.max(...db.customers.map((c) => c.seq_num)) + 1 : 1;
+  const custCurrency = currency === 'USD' ? 'USD' : 'IQD';
+  const seq_num = db.customers.length > 0 ? Math.max(...db.customers.map((c) => c.seq_num || 0)) + 1 : 1;
+  const custId = `cust-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
   const newCust: Customer = {
-    id: `cust-${Date.now()}`,
+    id: custId,
     market_id: marketId,
     seq_num,
     name: name.trim(),
     latin_name: latin_name ? latin_name.trim() : undefined,
     phone: phone.trim(),
     password: password.trim(),
-    currency: currency === 'USD' ? 'USD' : 'IQD',
+    currency: custCurrency,
     notes: notes ? notes.trim() : undefined,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
 
-  db.customers.push(newCust);
-  saveDb(db);
+  const operatorName = permCheck.userId || db.settings.owner_name;
 
-  res.status(201).json({
-    status: 'success',
-    data: {
-      ...newCust,
-      balance_iqd: 0,
-      balance_usd: 0
+  let initBalIqd = 0;
+  let initBalUsd = 0;
+
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
+
+      await client.query(`
+        INSERT INTO public.customers (id, market_id, seq_num, name, latin_name, phone, notes, status, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', NOW())
+      `, [custId, marketId, seq_num, name.trim(), latin_name ? latin_name.trim() : null, phone.trim(), notes ? notes.trim() : null]);
+
+      // Check opening balance IQD
+      const iqdVal = Number(opening_balance_iqd !== undefined ? opening_balance_iqd : (custCurrency === 'IQD' && opening_balance ? opening_balance : 0));
+      if (!isNaN(iqdVal) && iqdVal > 0 && Number.isInteger(iqdVal)) {
+        initBalIqd = iqdVal;
+        const opTxId = `tx-op-${Date.now()}-iqd`;
+        await client.query(`
+          INSERT INTO public.ledger_entries (
+            id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed
+          ) VALUES ($1, $2, $3, 'IQD', 'OPENING_BALANCE', $4, 'باڵانسی سەرەتایی', NOW(), NOW(), $5, false)
+        `, [opTxId, marketId, custId, iqdVal, operatorName]);
+
+        await updateCustomerBalanceForCurrency(marketId, custId, 'IQD', client);
+
+        db.transactions.push({
+          id: opTxId,
+          customer_id: custId,
+          market_id: marketId,
+          type: 'DEBT_ADD',
+          amount: iqdVal,
+          currency: 'IQD',
+          note: 'باڵانسی سەرەتایی',
+          timestamp: new Date().toISOString(),
+          created_by: operatorName
+        });
+      }
+
+      // Check opening balance USD
+      const usdVal = Number(opening_balance_usd !== undefined ? opening_balance_usd : (custCurrency === 'USD' && opening_balance ? opening_balance : 0));
+      if (!isNaN(usdVal) && usdVal > 0) {
+        initBalUsd = usdVal;
+        const opTxId = `tx-op-${Date.now()}-usd`;
+        await client.query(`
+          INSERT INTO public.ledger_entries (
+            id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed
+          ) VALUES ($1, $2, $3, 'USD', 'OPENING_BALANCE', $4, 'باڵانسی سەرەتایی', NOW(), NOW(), $5, false)
+        `, [opTxId, marketId, custId, usdVal, operatorName]);
+
+        await updateCustomerBalanceForCurrency(marketId, custId, 'USD', client);
+
+        db.transactions.push({
+          id: opTxId,
+          customer_id: custId,
+          market_id: marketId,
+          type: 'DEBT_ADD',
+          amount: usdVal,
+          currency: 'USD',
+          note: 'باڵانسی سەرەتایی',
+          timestamp: new Date().toISOString(),
+          created_by: operatorName
+        });
+      }
+
+      await client.query('COMMIT;');
+      db.customers.push(newCust);
+
+      return res.status(201).json({
+        status: 'success',
+        data: {
+          ...newCust,
+          balance_iqd: initBalIqd,
+          balance_usd: initBalUsd
+        }
+      });
+    } catch (err) {
+      await client.query('ROLLBACK;');
+      console.error('Error in POST /api/customers:', err);
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە زۆرکردنی کڕیار ڕوویدا' });
+    } finally {
+      client.release();
     }
-  });
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەری بنکەی داتا بەردەست نییە' });
+  }
 });
 
 // Get Customer Transactions
@@ -1618,9 +1810,9 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'جۆری مامەڵە دیاری نەکراوە' });
   }
 
-  const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) {
-    return res.status(400).json({ status: 'error', message: 'بڕی پارە دەبێت ژمارەیەکی دروست بێت' });
+  const validAmount = validateFinancialAmountAndCurrency(amount, currency);
+  if (!validAmount.valid) {
+    return res.status(400).json({ status: 'error', message: validAmount.error });
   }
 
   // Credit Control Check on DEBT_ADD
@@ -1653,15 +1845,14 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
       }
       if (credit.policy === 'HARD' && !req.body.override) {
         const currentBal = calculateCustomerBalances(cust.id);
-        const targetCurr = currency === 'USD' ? 'USD' : 'IQD';
-        if (targetCurr === 'IQD' && credit.limit_iqd > 0 && (currentBal.iqd + parsedAmount) > credit.limit_iqd) {
+        if (validAmount.currency === 'IQD' && credit.limit_iqd > 0 && (currentBal.iqd + validAmount.amount) > credit.limit_iqd) {
           return res.status(400).json({
             status: 'error',
             code: 'CREDIT_LIMIT_EXCEEDED',
             message: `بڕی قەرز لە سنووری ڕێگەپێدراو (${credit.limit_iqd.toLocaleString()} دینار) تێدەپەڕێت.`
           });
         }
-        if (targetCurr === 'USD' && credit.limit_usd > 0 && (currentBal.usd + parsedAmount) > credit.limit_usd) {
+        if (validAmount.currency === 'USD' && credit.limit_usd > 0 && (currentBal.usd + validAmount.amount) > credit.limit_usd) {
           return res.status(400).json({
             status: 'error',
             code: 'CREDIT_LIMIT_EXCEEDED',
@@ -1672,31 +1863,109 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
     }
   }
 
-  const newTx: Transaction = {
-    id: `tx-${Date.now()}`,
-    customer_id: cust.id,
-    market_id: cust.market_id,
-    type,
-    amount: parsedAmount,
-    currency: currency === 'USD' ? 'USD' : 'IQD',
-    note: (note || '').trim(),
-    timestamp: new Date().toISOString(),
-    created_by: db.settings.owner_name
-  };
+  const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || req.body?.idempotency_key;
+  const operatorName = permCheck.userId || db.settings.owner_name;
 
-  db.transactions.push(newTx);
-  cust.updated_at = newTx.timestamp;
-  saveDb(db);
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
 
-  const balances = calculateCustomerBalances(cust.id);
+      const custCheck = await client.query(
+        `SELECT * FROM public.customers WHERE id = $1 AND market_id = $2 FOR UPDATE`,
+        [cust.id, marketId]
+      );
+      if (custCheck.rows.length === 0) {
+        await client.query('ROLLBACK;');
+        return res.status(404).json({ status: 'error', message: 'Customer not found' });
+      }
 
-  res.status(201).json({
-    status: 'success',
-    data: {
-      transaction: newTx,
-      balances
+      if (idempotencyKey) {
+        const existingTx = await findExistingIdempotentTransaction(client, marketId, String(idempotencyKey));
+        if (existingTx) {
+          await client.query('COMMIT;');
+          const currentBal = calculateCustomerBalances(cust.id);
+          return res.status(200).json({
+            status: 'success',
+            data: {
+              transaction: {
+                id: existingTx.id,
+                customer_id: existingTx.customer_id,
+                market_id: existingTx.market_id,
+                type: existingTx.entry_type === 'DEBT_ADD' ? 'DEBT_ADD' : 'PAYMENT_RECEIVE',
+                amount: Number(existingTx.amount),
+                currency: existingTx.currency,
+                note: existingTx.note || '',
+                timestamp: existingTx.occurred_at ? new Date(existingTx.occurred_at).toISOString() : new Date().toISOString(),
+                reversed: existingTx.is_reversed || false,
+                created_by: existingTx.created_by || 'system'
+              },
+              balances: currentBal
+            }
+          });
+        }
+      }
+
+      if (type === 'PAYMENT_RECEIVE') {
+        const overCheck = await checkOverpaymentPolicy(client, marketId, cust.id, validAmount.currency, validAmount.amount);
+        if (!overCheck.allowed) {
+          await client.query('ROLLBACK;');
+          return res.status(400).json({ status: 'error', message: overCheck.message });
+        }
+      }
+
+      const txId = `tx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await client.query(`
+        INSERT INTO public.ledger_entries (
+          id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed, idempotency_key
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, false, $9)
+      `, [txId, marketId, cust.id, validAmount.currency, type, validAmount.amount, (note || '').trim() || null, operatorName, idempotencyKey ? String(idempotencyKey) : null]);
+
+      await updateCustomerBalanceForCurrency(marketId, cust.id, validAmount.currency, client);
+
+      const auditId = `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const auditDesc = type === 'DEBT_ADD' ? `تۆمارکردنی قەرزی نوێ: ${validAmount.amount} ${validAmount.currency}` : `وەریگرتنی پارە: ${validAmount.amount} ${validAmount.currency}`;
+      await client.query(`
+        INSERT INTO public.audit_logs (id, customer_id, market_id, action_type, description, performed_by, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `, [auditId, cust.id, marketId, type, auditDesc, operatorName]);
+
+      await client.query('COMMIT;');
+
+      const newTx: Transaction = {
+        id: txId,
+        customer_id: cust.id,
+        market_id: cust.market_id,
+        type,
+        amount: validAmount.amount,
+        currency: validAmount.currency,
+        note: (note || '').trim(),
+        timestamp: new Date().toISOString(),
+        created_by: operatorName
+      };
+
+      db.transactions.push(newTx);
+      cust.updated_at = newTx.timestamp;
+
+      const balances = calculateCustomerBalances(cust.id);
+
+      return res.status(201).json({
+        status: 'success',
+        data: {
+          transaction: newTx,
+          balances
+        }
+      });
+    } catch (err) {
+      await client.query('ROLLBACK;');
+      console.error('Error in financial POST transaction:', err);
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە پاشەکەوتکردنی مامەڵە ڕوویدا' });
+    } finally {
+      client.release();
     }
-  });
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەری بنکەی داتا بەردەست نییە' });
+  }
 });
 
 // Reverse/Delete Transaction with Audit
@@ -1710,101 +1979,194 @@ app.post('/api/customers/:id/transactions/:txId/reverse', async (req, res) => {
     return res.status(404).json({ status: 'error', message: 'Customer not found' });
   }
 
-  const tx = db.transactions.find(
-    (t) => t.id === req.params.txId && t.customer_id === req.params.id
-  );
+  const { reason } = req.body || {};
+  const revReason = (reason || 'پاشگەزبوونەوە لە مامەڵە').trim();
+  const operatorName = permCheck.userId || db.settings.owner_name;
 
-  if (!tx || tx.market_id !== marketId) {
-    return res.status(404).json({ status: 'error', message: 'Transaction not found' });
-  }
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
 
-  if (tx.reversed) {
-    return res.status(400).json({ status: 'error', message: 'مامەڵەکە پێشتر هەڵوەشێنراوەتەوە' });
-  }
+      const txRes = await client.query(`
+        SELECT * FROM public.ledger_entries WHERE id = $1 AND market_id = $2 AND customer_id = $3 FOR UPDATE
+      `, [req.params.txId, marketId, cust.id]);
 
-  const { reason } = req.body;
-  tx.reversed = true;
-  tx.reversed_reason = reason || 'پاشگەزبوونەوە لە مامەڵە';
-  saveDb(db);
+      if (txRes.rows.length === 0) {
+        await client.query('ROLLBACK;');
+        return res.status(404).json({ status: 'error', message: 'Transaction not found' });
+      }
 
-  logAudit(req.params.id, tx.market_id, 'TRANSACTION_REVERSED', `مامەڵەی ${tx.amount} (${tx.currency}) هەڵوەشێنراوەتەوە: ${tx.reversed_reason}`, db.settings.owner_name);
+      const origTx = txRes.rows[0];
+      if (origTx.is_reversed) {
+        await client.query('ROLLBACK;');
+        return res.status(400).json({ status: 'error', message: 'مامەڵەکە پێشتر هەڵوەشێنراوەتەوە' });
+      }
 
-  const balances = calculateCustomerBalances(req.params.id);
+      const existingRev = await client.query(`
+        SELECT id FROM public.ledger_entries WHERE reversal_of_entry_id = $1
+      `, [origTx.id]);
+      if (existingRev.rows.length > 0) {
+        await client.query('ROLLBACK;');
+        return res.status(400).json({ status: 'error', message: 'مامەڵەکە پێشتر هەڵوەشێنراوەتەوە' });
+      }
 
-  res.json({
-    status: 'success',
-    message: 'مامەڵەکە بە سەرکەوتوویی هەڵوەشێنراوەتەوە',
-    data: {
-      balances
+      await client.query(`
+        UPDATE public.ledger_entries 
+        SET is_reversed = true, reversed_at = NOW(), reversed_by = $1, reversal_reason = $2
+        WHERE id = $3
+      `, [operatorName, revReason, origTx.id]);
+
+      const revId = `rev-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await client.query(`
+        INSERT INTO public.ledger_entries (
+          id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed, reversal_of_entry_id, reversal_reason
+        ) VALUES ($1, $2, $3, $4, 'REVERSAL', $5, $6, NOW(), NOW(), $7, true, $8, $9)
+      `, [revId, marketId, cust.id, origTx.currency, origTx.amount, `پاشگەزبوونەوە: ${revReason}`, operatorName, origTx.id, revReason]);
+
+      await updateCustomerBalanceForCurrency(marketId, cust.id, origTx.currency, client);
+
+      const auditId = `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await client.query(`
+        INSERT INTO public.audit_logs (id, customer_id, market_id, action_type, description, performed_by, timestamp)
+        VALUES ($1, $2, $3, 'TRANSACTION_REVERSED', $4, $5, NOW())
+      `, [auditId, cust.id, marketId, `مامەڵەی ${origTx.amount} (${origTx.currency}) هەڵوەشێنراوەتەوە: ${revReason}`, operatorName]);
+
+      await client.query('COMMIT;');
+
+      const memTx = db.transactions.find((t) => t.id === req.params.txId);
+      if (memTx) {
+        memTx.reversed = true;
+        memTx.reversed_reason = revReason;
+      }
+
+      const balances = calculateCustomerBalances(cust.id);
+
+      return res.json({
+        status: 'success',
+        message: 'مامەڵەکە بە سەرکەوتوویی هەڵوەشێنراوەتەوە',
+        data: { balances }
+      });
+    } catch (err) {
+      await client.query('ROLLBACK;');
+      console.error('Error in REVERSE transaction:', err);
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە هەڵوەشاندنەوەی مامەڵە ڕوویدا' });
+    } finally {
+      client.release();
     }
-  });
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەری بنکەی داتا بەردەست نییە' });
+  }
 });
 
 // Edit Transaction
-app.put('/api/customers/:id/transactions/:txId', (req, res) => {
+app.put('/api/customers/:id/transactions/:txId', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'ADD_DEBT');
+  if (!permCheck.authorized) return;
+
   const marketId = getMarketId(req);
   const cust = db.customers.find((c) => c.id === req.params.id);
   if (!cust || cust.market_id !== marketId) {
     return res.status(404).json({ status: 'error', message: 'کڕیار نەدۆزرایەوە' });
   }
 
-  const tx = db.transactions.find(
-    (t) => t.id === req.params.txId && t.customer_id === req.params.id
-  );
-
-  if (!tx || tx.market_id !== marketId) {
-    return res.status(404).json({ status: 'error', message: 'مامەڵەکە نەدۆزرایەوە' });
-  }
-
-  if (tx.reversed) {
-    return res.status(400).json({ status: 'error', message: 'ناتوانرێت مامەڵەی هەڵوەشێنراوە دەستکاری بكرێت' });
-  }
-
-  const { amount, currency, type, note, updated_by } = req.body;
-
-  const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) {
-    return res.status(400).json({ status: 'error', message: 'بڕی پارە دەبێت ژمارەیەکی دروست بێت' });
-  }
+  const { amount, currency, type, note } = req.body || {};
 
   if (type !== 'DEBT_ADD' && type !== 'PAYMENT_RECEIVE') {
     return res.status(400).json({ status: 'error', message: 'جۆری مامەڵە هەڵەیە' });
   }
 
-  const oldAmount = tx.amount;
-  const oldCurrency = tx.currency;
-  const oldType = tx.type;
-
-  tx.amount = parsedAmount;
-  tx.currency = currency === 'USD' ? 'USD' : 'IQD';
-  tx.type = type;
-  if (note !== undefined) {
-    tx.note = String(note).trim();
+  const validAmount = validateFinancialAmountAndCurrency(amount, currency);
+  if (!validAmount.valid) {
+    return res.status(400).json({ status: 'error', message: validAmount.error });
   }
 
-  cust.updated_at = new Date().toISOString();
+  const operatorName = permCheck.userId || db.settings.owner_name;
 
-  const operator = updated_by || db.settings.owner_name;
-  logAudit(
-    req.params.id,
-    tx.market_id,
-    'TRANSACTION_EDITED',
-    `دەستکاری مامەڵە: لە [${oldAmount} ${oldCurrency} - ${oldType}] گۆڕدرا بۆ [${tx.amount} ${tx.currency} - ${tx.type}] (تێبینی: ${tx.note || 'بێ تێبینی'})`,
-    operator
-  );
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
 
-  saveDb(db);
+      const txRes = await client.query(`
+        SELECT * FROM public.ledger_entries WHERE id = $1 AND market_id = $2 AND customer_id = $3 FOR UPDATE
+      `, [req.params.txId, marketId, cust.id]);
 
-  const balances = calculateCustomerBalances(req.params.id);
+      if (txRes.rows.length === 0) {
+        await client.query('ROLLBACK;');
+        return res.status(404).json({ status: 'error', message: 'مامەڵەکە نەدۆزرایەوە' });
+      }
 
-  res.json({
-    status: 'success',
-    message: 'مامەڵەکە بە سەرکەوتوویی دەستکاری کرا',
-    data: {
-      transaction: tx,
-      balances
+      const oldTx = txRes.rows[0];
+      if (oldTx.is_reversed) {
+        await client.query('ROLLBACK;');
+        return res.status(400).json({ status: 'error', message: 'ناتوانرێت مامەڵەی هەڵوەشێنراوە دەستکاری بكرێت' });
+      }
+
+      const editReason = `دەستکاریکردن: گۆڕدرا بۆ ${validAmount.amount} ${validAmount.currency}`;
+      await client.query(`
+        UPDATE public.ledger_entries
+        SET is_reversed = true, reversed_at = NOW(), reversed_by = $1, reversal_reason = $2
+        WHERE id = $3
+      `, [operatorName, editReason, oldTx.id]);
+
+      const newTxId = `tx-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await client.query(`
+        INSERT INTO public.ledger_entries (
+          id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed, reversal_of_entry_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, false, $9)
+      `, [newTxId, marketId, cust.id, validAmount.currency, type, validAmount.amount, (note || '').trim() || null, operatorName, oldTx.id]);
+
+      await updateCustomerBalanceForCurrency(marketId, cust.id, oldTx.currency, client);
+      if (oldTx.currency !== validAmount.currency) {
+        await updateCustomerBalanceForCurrency(marketId, cust.id, validAmount.currency, client);
+      }
+
+      const auditId = `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      await client.query(`
+        INSERT INTO public.audit_logs (id, customer_id, market_id, action_type, description, performed_by, timestamp)
+        VALUES ($1, $2, $3, 'TRANSACTION_EDITED', $4, $5, NOW())
+      `, [auditId, cust.id, marketId, `دەستکاری مامەڵە: لە [${oldTx.amount} ${oldTx.currency}] بۆ [${validAmount.amount} ${validAmount.currency}]`, operatorName]);
+
+      await client.query('COMMIT;');
+
+      const memTx = db.transactions.find((t) => t.id === req.params.txId);
+      if (memTx) {
+        memTx.reversed = true;
+        memTx.reversed_reason = editReason;
+      }
+      const updatedTx: Transaction = {
+        id: newTxId,
+        customer_id: cust.id,
+        market_id: cust.market_id,
+        type,
+        amount: validAmount.amount,
+        currency: validAmount.currency,
+        note: (note || '').trim(),
+        timestamp: new Date().toISOString(),
+        created_by: operatorName
+      };
+      db.transactions.push(updatedTx);
+
+      const balances = calculateCustomerBalances(cust.id);
+      return res.json({
+        status: 'success',
+        message: 'مامەڵەکە بە سەرکەوتوویی دەستکاری کرا',
+        data: {
+          transaction: updatedTx,
+          balances
+        }
+      });
+    } catch (err) {
+      await client.query('ROLLBACK;');
+      console.error('Error in EDIT transaction:', err);
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە دەستکاریکردنی مامەڵە ڕوویدا' });
+    } finally {
+      client.release();
     }
-  });
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەری بنکەی داتا بەردەست نییە' });
+  }
 });
 
 // ==================================================
