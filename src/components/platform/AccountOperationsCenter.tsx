@@ -94,15 +94,33 @@ export const AccountOperationsCenter: React.FC = () => {
       const res = await fetch('/api/platform/account-operations', {
         headers: getAuthHeaders()
       });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        if (res.status === 503) {
+          throw new Error('سیستەمی بنکەی زانیاری لەبەردەستدا نییە (503)');
+        }
+        if (res.status === 401 || res.status === 403) {
+          throw new Error('دەستگەیشتن ڕەتکرایەوە - تکایە بە هەژمانی خاوەنی سیستەم بچۆژوورەوە (403)');
+        }
+        throw new Error('وەڵامی سێرڤەر بە شێوازی JSON نەنێردراوە');
+      }
+
       const text = await res.text();
       let data: any = {};
       try {
         data = JSON.parse(text);
       } catch {
-        throw new Error('وەڵامی سێرڤەر نادروستە');
+        throw new Error('وەڵامی سێرڤەر بە شێوازی نەگونجاو نێردراوە');
       }
 
       if (!res.ok) {
+        if (res.status === 503 || data.code === 'DATABASE_UNAVAILABLE') {
+          throw new Error(data.message || 'سیستەمی بنکەی زانیاری لەبەردەستدا نییە (503)');
+        }
+        if (res.status === 401 || res.status === 403 || data.code === 'NOT_AUTHORIZED_PLATFORM_OWNER') {
+          throw new Error(data.message || 'دەستگەیشتن ڕەتکرایەوە - تەنها خاوەنی سیستەم دەتوانێت ئەم بەشە ببینێت');
+        }
         throw new Error(data.message || 'هەڵە لە وەرگرتنی زانیارییەکان');
       }
 
@@ -116,7 +134,7 @@ export const AccountOperationsCenter: React.FC = () => {
         typeof data.data.total !== 'number'
       ) {
         console.error('Invalid response contract:', data);
-        throw new Error('وەڵامی سێرڤەر نادروستە');
+        throw new Error('شێوازی وەڵامی سێرڤەر نادروستە');
       }
 
       setRecords(data.data.items);

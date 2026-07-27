@@ -2887,18 +2887,42 @@ app.post('/api/auth/login', async (req, res) => {
 
   const trimmedPhone = identity.trim();
 
-  // Look up Supabase Auth user if available
+  // 1. Authenticate with Supabase Auth
+  let sessionToken: string | null = null;
   let authUid: string | null = null;
+
   if (supabase) {
     try {
-      const { data: listData } = await supabase.auth.admin.listUsers();
-      const authUser = listData?.users.find((u: any) => u.phone === trimmedPhone || u.email === trimmedPhone || u.email === `${trimmedPhone}@zhirox.com`);
-      if (authUser) {
-        authUid = authUser.id;
+      const isEmail = trimmedPhone.includes('@');
+      let authRes;
+      if (isEmail) {
+        authRes = await supabase.auth.signInWithPassword({
+          email: trimmedPhone,
+          password
+        });
+      } else {
+        authRes = await supabase.auth.signInWithPassword({
+          phone: trimmedPhone.replace(/\s+/g, ''),
+          password
+        });
+      }
+
+      if (authRes.data?.session?.access_token) {
+        sessionToken = authRes.data.session.access_token;
+        authUid = authRes.data.session.user.id;
+      } else if (authRes.error) {
+        console.warn('Supabase Auth signInWithPassword error:', authRes.error.message);
       }
     } catch (e) {
       console.error('Supabase Auth user lookup error on login:', e);
     }
+  }
+
+  if (!sessionToken || !authUid) {
+    return res.status(401).json({
+      status: 'error',
+      message: 'ژمارەی مۆبایل/ئیمەیڵ یان وشەی نهێنی هەڵەیە'
+    });
   }
 
   // Check PostgreSQL users & memberships
@@ -2929,7 +2953,7 @@ app.post('/api/auth/login', async (req, res) => {
         return res.json({
           status: 'success',
           data: {
-            session_token: 'zhirox_platform_owner_session',
+            session_token: sessionToken,
             identity: trimmedPhone,
             userName: poUser.full_name || 'خاوەنی سیستەم',
             auth_uid: poUser.auth_user_id,
@@ -3256,59 +3280,66 @@ app.post('/api/auth/verify-otp', (req, res) => {
 // Platform Owner Direct Authentication
 app.post('/api/auth/login-platform-owner', async (req, res) => {
   const { password, identity } = req.body;
-  const cleanId = (identity || '').trim().toLowerCase();
+  const cleanId = (identity || '').trim();
 
-  // Strict check: if identity is provided, it must be the platform owner identity.
-  if (cleanId !== '' && cleanId !== '07500000000' && cleanId !== 'admin@zhirox.com' && cleanId !== 'usr-platform-owner') {
-    return res.status(401).json({
+  if (!password || !cleanId) {
+    return res.status(400).json({
       status: 'error',
-      message: 'ئەم هەژمارە دەسەڵاتی خاوەنی سیستەمی نییە'
+      message: 'تکایە هەژمار و وشەی نهێنی بنووسە'
     });
   }
 
-  let isAuthorizedPO = false;
-  let foundAuthUserId = 'usr-platform-owner';
-
-  if (pool) {
+  if (supabase) {
     try {
-      const dbRes = await pool.query(`
-        SELECT pa.status, u.id, u.auth_user_id
-        FROM public.platform_access pa
-        JOIN public.users u ON pa.user_id = u.id
-        WHERE (u.email = $1 OR u.phone = $1 OR u.auth_user_id::text = $1::text OR u.id::text = $1::text OR $1 = '' OR $1 = '07500000000' OR $1 = 'admin@zhirox.com')
-          AND pa.role = 'PLATFORM_OWNER'
-          AND pa.status = 'ACTIVE'
-          AND u.is_active = true
-      `, [cleanId]);
+      const isEmail = cleanId.includes('@');
+      let authRes;
+      if (isEmail) {
+        authRes = await supabase.auth.signInWithPassword({ email: cleanId, password });
+      } else {
+        authRes = await supabase.auth.signInWithPassword({ phone: cleanId.replace(/\s+/g, ''), password });
+      }
 
-      if (dbRes.rows.length > 0) {
-        isAuthorizedPO = true;
-        foundAuthUserId = dbRes.rows[0].auth_user_id || dbRes.rows[0].id;
+      if (authRes.data?.session?.access_token) {
+        const sessionToken = authRes.data.session.access_token;
+        const authUid = authRes.data.session.user.id;
+
+        if (pool) {
+          const poRes = await pool.query(`
+            SELECT pa.status, u.id, u.auth_user_id, u.full_name
+            FROM public.platform_access pa
+            JOIN public.users u ON pa.user_id = u.id
+            WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text)
+              AND pa.role = 'PLATFORM_OWNER'
+              AND pa.status = 'ACTIVE'
+              AND u.is_active = true
+          `, [authUid]);
+
+          if (poRes.rows.length > 0) {
+            return res.json({
+              status: 'success',
+              session_token: sessionToken,
+              auth_user_id: authUid,
+              userName: poRes.rows[0].full_name || 'خاوەنی سیستەم',
+              activeContext: {
+                context_id: 'mem-platform-owner',
+                tenant_id: 'SYSTEM_GLOBAL',
+                tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
+                role: 'PLATFORM_OWNER',
+                role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
+                permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
+              }
+            });
+          }
+        }
       }
     } catch (err) {
       console.error('Error verifying platform owner during login:', err);
     }
   }
 
-  if (isAuthorizedPO) {
-    return res.json({
-      status: 'success',
-      session_token: 'zhirox_platform_owner_session',
-      auth_user_id: foundAuthUserId,
-      activeContext: {
-        context_id: 'mem-platform-owner',
-        tenant_id: 'SYSTEM_GLOBAL',
-        tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-        role: 'PLATFORM_OWNER',
-        role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-        permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-      }
-    });
-  }
-
   return res.status(401).json({
     status: 'error',
-    message: 'ژمارەی مۆبایل یان وشەی نهێنی خاوەنی سیستەم هەڵەیە'
+    message: 'ژمارەی مۆبایل/ئیمەیڵ یان وشەی نهێنی خاوەنی سیستەم هەڵەیە'
   });
 });
 
@@ -4432,48 +4463,45 @@ app.get('/api/platform/overview', async (req, res) => {
     });
   }
 
-  if (pool) {
-    try {
-      const resMarkets = await pool.query(`SELECT status, count(*) FROM public.markets WHERE id != 'SYSTEM_GLOBAL' GROUP BY status`);
-      const resManagers = await pool.query(`SELECT count(*) FROM public.market_memberships WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER')`);
-      const resCustomers = await pool.query(`SELECT count(*) FROM public.customers`);
-
-      let total = 0, active = 0, suspended = 0;
-      resMarkets.rows.forEach(r => {
-        const count = parseInt(r.count, 10);
-        total += count;
-        if (r.status === 'ACTIVE') active += count;
-        if (r.status === 'SUSPENDED') suspended += count;
-      });
-
-      return res.json({
-        status: 'success',
-        data: {
-          total_markets: total,
-          active_markets: active,
-          suspended_markets: suspended,
-          expired_licenses: 0,
-          total_managers: parseInt(resManagers.rows[0]?.count || '0', 10),
-          total_customers: parseInt(resCustomers.rows[0]?.count || '0', 10)
-        }
-      });
-    } catch (e) {
-      console.error('Failed to query overview stats from Postgres:', e);
-    }
+  if (!pool) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'سیستەمی بنکەی زانیاری لەبەردەستدا نییە'
+    });
   }
 
-  // Fallback Overview Data when DB unavailable
-  res.json({
-    status: 'success',
-    data: {
-      total_markets: 0,
-      active_markets: 0,
-      suspended_markets: 0,
-      expired_licenses: 0,
-      total_managers: 0,
-      total_customers: 0
-    }
-  });
+  try {
+    const resMarkets = await pool.query(`SELECT status, count(*) FROM public.markets WHERE id != 'SYSTEM_GLOBAL' GROUP BY status`);
+    const resManagers = await pool.query(`SELECT count(*) FROM public.market_memberships WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER')`);
+
+    let total = 0, active = 0, suspended = 0;
+    resMarkets.rows.forEach(r => {
+      const count = parseInt(r.count, 10);
+      total += count;
+      if (r.status === 'ACTIVE') active += count;
+      if (r.status === 'SUSPENDED') suspended += count;
+    });
+
+    return res.json({
+      status: 'success',
+      data: {
+        total_markets: total,
+        active_markets: active,
+        suspended_markets: suspended,
+        expired_licenses: 0,
+        total_managers: parseInt(resManagers.rows[0]?.count || '0', 10),
+        total_customers: 0
+      }
+    });
+  } catch (e) {
+    console.error('Failed to query overview stats from Postgres:', e);
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'کێشە لە ڕاپرسی بنکەی زانیاری'
+    });
+  }
 });
 
 // Platform Get All Markets
@@ -4486,58 +4514,59 @@ app.get('/api/platform/markets', async (req, res) => {
     });
   }
 
-  if (pool) {
-    try {
-      const result = await pool.query(`
-        SELECT 
-          m.id, 
-          m.name, 
-          m.status, 
-          m.created_at,
-          COALESCE(u.full_name, 'دیاری نەکراو') as owner_name,
-          COALESCE(u.email, '') as owner_email,
-          COALESCE(u.phone, '') as owner_phone,
-          (m.created_at + INTERVAL '1 year')::text as license_expires_at,
-          (SELECT COUNT(*) FROM public.market_memberships mm WHERE mm.market_id = m.id) as managers_count,
-          (SELECT COUNT(*) FROM public.customers c WHERE c.market_id = m.id) as customers_count,
-          'IQD' as currency
-        FROM public.markets m
-        LEFT JOIN public.market_memberships mm ON mm.market_id = m.id AND mm.role IN ('OWNER', 'MARKET_OWNER')
-        LEFT JOIN public.users u ON mm.user_id = u.id
-        WHERE m.id != 'SYSTEM_GLOBAL'
-        ORDER BY m.created_at DESC
-      `);
-
-      const enriched = result.rows.map((row: any) => {
-        const found = db.markets?.find((m: any) => m.id === row.id);
-        return {
-          ...row,
-          owner_phone: row.owner_phone || found?.owner_phone || ''
-        };
-      });
-      return res.json({
-        status: 'success',
-        data: {
-          items: enriched,
-          total: enriched.length,
-          page: 1,
-          pageSize: 20
-        }
-      });
-    } catch (e) {
-      console.error('Failed to query markets from Postgres:', e);
-    }
+  if (!pool) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'سیستەمی بنکەی زانیاری لەبەردەستدا نییە'
+    });
   }
 
-  res.json({
-    status: 'success',
-    data: {
-      items: [],
-      total: 0,
-      page: 1,
-      pageSize: 20
-    }
-  });
+  try {
+    const result = await pool.query(`
+      SELECT 
+        m.id, 
+        m.name, 
+        m.status, 
+        m.created_at,
+        COALESCE(u.full_name, 'دیاری نەکراو') as owner_name,
+        COALESCE(u.email, '') as owner_email,
+        COALESCE(u.phone, '') as owner_phone,
+        (m.created_at + INTERVAL '1 year')::text as license_expires_at,
+        (SELECT COUNT(*) FROM public.market_memberships mm WHERE mm.market_id = m.id) as managers_count,
+        0 as customers_count,
+        'IQD' as currency
+      FROM public.markets m
+      LEFT JOIN public.market_memberships mm ON mm.market_id = m.id AND mm.role IN ('OWNER', 'MARKET_OWNER', 'MARKET_MANAGER')
+      LEFT JOIN public.users u ON mm.user_id = u.id
+      WHERE m.id != 'SYSTEM_GLOBAL'
+      ORDER BY m.created_at DESC
+    `);
+
+    const enriched = result.rows.map((row: any) => {
+      const found = db.markets?.find((m: any) => m.id === row.id);
+      return {
+        ...row,
+        owner_phone: row.owner_phone || found?.owner_phone || ''
+      };
+    });
+    return res.json({
+      status: 'success',
+      data: {
+        items: enriched,
+        total: enriched.length,
+        page: 1,
+        pageSize: 20
+      }
+    });
+  } catch (e) {
+    console.error('Failed to query markets from Postgres:', e);
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'کێشە لە ڕاپرسی بنکەی زانیاری'
+    });
+  }
 });
 
 // Platform Create New Market
@@ -4941,63 +4970,57 @@ app.post('/api/platform/markets/:market_id/managers', async (req, res) => {
 
 // Platform Get All Managers
 app.get('/api/platform/managers', async (req, res) => {
-  if (pool) {
-    try {
-      const result = await pool.query(`
-        SELECT 
-          mm.id,
-          mm.market_id,
-          mm.user_id,
-          u.full_name,
-          u.email,
-          u.phone,
-          mm.role,
-          mm.status,
-          mm.created_at
-        FROM public.market_memberships mm
-        JOIN public.users u ON mm.user_id = u.id
-        WHERE mm.market_id != 'SYSTEM_GLOBAL'
-        ORDER BY mm.created_at DESC
-      `);
-
-      if (result.rows.length > 0) {
-        return res.json({
-          status: 'success',
-          data: {
-            items: result.rows,
-            total: result.rows.length,
-            page: 1,
-            pageSize: 20
-          }
-        });
-      }
-    } catch (e) {
-      console.error('Failed querying managers:', e);
-    }
+  if (!(await isActorPlatformOwner(req))) {
+    return res.status(403).json({
+      status: 'error',
+      code: 'NOT_AUTHORIZED_PLATFORM_OWNER',
+      message: 'دەستگەیشتن ڕەتکرایەوە - تەنها خاوەنی سیستەم دەتوانێت بەڕێوەبەرەکان ببینێت'
+    });
   }
 
-  // Fallback
-  res.json({
-    status: 'success',
-    data: {
-      items: [
-        {
-          id: 'mem-kawan-erbil',
-          market_id: 'zhirox-market-erbil',
-          user_id: 'usr-kawan',
-          full_name: 'کاک کاوان',
-          email: 'kawan@zhirox.com',
-          phone: '07501234567',
-          role: 'MARKET_OWNER',
-          status: 'ACTIVE',
-          created_at: new Date().toISOString()
-        }
-      ],
-      total: 1,
-      page: 1,
-      pageSize: 20
-    }
-  });
+  if (!pool) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'سیستەمی بنکەی زانیاری لەبەردەستدا نییە'
+    });
+  }
+
+  try {
+    const result = await pool.query(`
+      SELECT 
+        mm.id,
+        mm.market_id,
+        mm.user_id,
+        u.full_name,
+        u.email,
+        u.phone,
+        mm.role,
+        mm.status,
+        mm.created_at
+      FROM public.market_memberships mm
+      JOIN public.users u ON mm.user_id = u.id
+      WHERE mm.market_id != 'SYSTEM_GLOBAL'
+      ORDER BY mm.created_at DESC
+    `);
+
+    return res.json({
+      status: 'success',
+      data: {
+        items: result.rows,
+        total: result.rows.length,
+        page: 1,
+        pageSize: 20
+      }
+    });
+  } catch (e) {
+    console.error('Failed querying managers from Postgres:', e);
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'کێشە لە ڕاپرسی بنکەی زانیاری'
+    });
+  }
 });
 
 // ZHIROX ACCOUNT OPERATIONS CENTER ENDPOINTS
@@ -5012,199 +5035,198 @@ app.get('/api/platform/account-operations', async (req, res) => {
     });
   }
 
-  if (pool) {
-    try {
-      const marketsRes = await pool.query(`
-        SELECT 
-          m.id as market_id,
-          m.name as official_market_name,
-          m.status as license_status,
-          m.created_at,
-          (m.created_at + INTERVAL '1 year')::text as license_expires_at,
-          'IQD' as currency
-        FROM public.markets m
-        WHERE m.id != 'SYSTEM_GLOBAL'
-        ORDER BY m.created_at DESC;
-      `);
-
-      const opsRecords: any[] = [];
-      let totalCount = 0, activeCount = 0, pendingCount = 0, suspendedCount = 0, revokedCount = 0, needsReviewCount = 0;
-
-      for (const m of marketsRes.rows) {
-        totalCount++;
-        const localM = db.markets?.find((dbM: any) => dbM.id === m.market_id);
-
-        const memsRes = await pool.query(`
-          SELECT 
-            mm.id as membership_id,
-            mm.user_id,
-            mm.role as manager_role,
-            mm.status as membership_status,
-            mm.created_at as membership_created_at,
-            mm.updated_at as membership_updated_at,
-            u.full_name as manager_name,
-            u.email as manager_email,
-            u.phone as manager_login_phone,
-            u.auth_user_id
-          FROM public.market_memberships mm
-          JOIN public.users u ON mm.user_id = u.id
-          WHERE mm.market_id = $1 AND mm.role IN ('OWNER', 'MARKET_OWNER', 'MANAGER')
-          ORDER BY mm.created_at DESC;
-        `, [m.market_id]);
-
-        const ownerMemInRows = memsRes.rows.find((r: any) => r.manager_role === 'OWNER' || r.manager_role === 'MARKET_OWNER') || memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
-        const registeredPhone = ownerMemInRows?.manager_login_phone || localM?.registered_phone || localM?.owner_phone || '07501234567';
-
-        const tokensRes = await pool.query(`
-          SELECT id, user_id, status, expires_at, consumed_at, created_at
-          FROM public.activation_tokens
-          WHERE market_id = $1
-          ORDER BY created_at DESC;
-        `, [m.market_id]);
-
-        const primaryMem = memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
-        const pendingReplMem = memsRes.rows.find((r: any) => r.membership_status === 'PENDING_ACTIVATION' && primaryMem && r.user_id !== primaryMem.user_id);
-
-        let membershipStatus = primaryMem ? primaryMem.membership_status : 'PENDING_ACTIVATION';
-        let managerName = primaryMem ? primaryMem.manager_name : (localM?.owner_name || 'دیاری نەکراو');
-        let managerUserId = primaryMem ? primaryMem.user_id : `usr-${m.market_id}`;
-        let managerLoginPhone = primaryMem?.manager_login_phone || localM?.manager_login_phone || registeredPhone;
-        let managerEmail = primaryMem?.manager_email || localM?.owner_email || '';
-        let managerRole = primaryMem?.manager_role || 'MANAGER';
-        let membershipId = primaryMem?.membership_id || `mem-${m.market_id}`;
-
-        const token = tokensRes.rows.find((t: any) => t.user_id === managerUserId || t.status === 'PENDING');
-        let activationStatus = 'NONE';
-        let activationTokenId = token?.id;
-        let activationExpiresAt = token?.expires_at;
-
-        if (membershipStatus === 'PENDING_ACTIVATION') {
-          if (token) {
-            if (token.status === 'CONSUMED') activationStatus = 'ACTIVATED';
-            else if (token.status === 'REVOKED') activationStatus = 'REVOKED';
-            else if (new Date(token.expires_at) < new Date()) activationStatus = 'EXPIRED';
-            else activationStatus = 'READY';
-          } else {
-            activationStatus = 'READY';
-          }
-        } else if (membershipStatus === 'ACTIVE') {
-          activationStatus = 'ACTIVATED';
-        }
-
-        let authLinkageStatus = 'INCOMPLETE';
-        if (primaryMem && primaryMem.auth_user_id && !primaryMem.auth_user_id.startsWith('auth-usr-')) {
-          authLinkageStatus = 'LINKED';
-        } else if (membershipStatus === 'PENDING_ACTIVATION') {
-          authLinkageStatus = 'PENDING_ACTIVATION';
-        } else if (primaryMem?.auth_user_id) {
-          authLinkageStatus = 'LINKED';
-        }
-
-        const healthFlags: string[] = [];
-        if (membershipStatus === 'PENDING_ACTIVATION') {
-          healthFlags.push('PENDING_ACTIVATION');
-          pendingCount++;
-        }
-        if (membershipStatus === 'SUSPENDED') {
-          healthFlags.push('SUSPENDED');
-          suspendedCount++;
-        }
-        if (membershipStatus === 'REVOKED') {
-          healthFlags.push('REVOKED');
-          revokedCount++;
-        }
-        if (membershipStatus === 'ACTIVE') {
-          activeCount++;
-        }
-        if (activationStatus === 'EXPIRED') {
-          healthFlags.push('EXPIRED_ACTIVATION');
-        }
-        if (authLinkageStatus === 'INCOMPLETE' && membershipStatus === 'ACTIVE') {
-          healthFlags.push('MISSING_AUTH_LINK');
-        }
-        if (memsRes.rows.filter((r: any) => r.membership_status === 'ACTIVE').length > 1) {
-          healthFlags.push('AMBIGUOUS_MANAGER_RELATIONSHIP');
-        }
-
-        if (healthFlags.length > 0 && membershipStatus !== 'ACTIVE') {
-          needsReviewCount++;
-        }
-
-        let pendingReplacement = null;
-        if (pendingReplMem) {
-          const replToken = tokensRes.rows.find((t: any) => t.user_id === pendingReplMem.user_id && t.status === 'PENDING');
-          pendingReplacement = {
-            candidate_user_id: pendingReplMem.user_id,
-            candidate_name: pendingReplMem.manager_name,
-            candidate_login_phone: pendingReplMem.manager_login_phone || registeredPhone,
-            candidate_email: pendingReplMem.manager_email,
-            activation_token_id: replToken?.id,
-            activation_expires_at: replToken?.expires_at,
-            created_at: pendingReplMem.membership_created_at
-          };
-        }
-
-        opsRecords.push({
-          market_id: m.market_id,
-          official_market_name: m.official_market_name,
-          official_registered_phone: registeredPhone,
-          currency: m.currency,
-          license_status: m.license_status,
-          license_expires_at: m.license_expires_at,
-          created_at: m.created_at,
-          
-          manager_user_id: managerUserId,
-          manager_name: managerName,
-          manager_login_phone: managerLoginPhone,
-          manager_email: managerEmail,
-          manager_role: managerRole,
-
-          membership_id: membershipId,
-          membership_status: membershipStatus,
-          activation_status: activationStatus,
-          auth_linkage_status: authLinkageStatus,
-
-          activated_at: membershipStatus === 'ACTIVE' ? primaryMem?.membership_updated_at : null,
-          activation_token_id: activationTokenId,
-          activation_token_expires_at: activationExpiresAt,
-          pending_replacement: pendingReplacement,
-          health_flags: healthFlags
-        });
-      }
-
-      return res.json({
-        status: 'success',
-        data: {
-          items: opsRecords,
-          total: opsRecords.length,
-          page: 1,
-          pageSize: 20
-        },
-        summary: {
-          total_accounts: totalCount,
-          active_count: activeCount,
-          pending_activation_count: pendingCount,
-          suspended_count: suspendedCount,
-          revoked_count: revokedCount,
-          needs_review_count: needsReviewCount
-        }
-      });
-    } catch (err) {
-      console.error('Failed querying account operations:', err);
-      return res.status(500).json({ status: 'error', message: 'کێشە لە وەگرتنی زانیارییەکانی بەڕێوەبردنی هەژمارەکان' });
-    }
+  if (!pool) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'سیستەمی بنکەی زانیاری لەبەردەستدا نییە'
+    });
   }
 
-  res.json({
-    status: 'success',
-    data: {
-      items: [],
-      total: 0,
-      page: 1,
-      pageSize: 20
-    },
-    summary: { total_accounts: 0, active_count: 0, pending_activation_count: 0, suspended_count: 0, revoked_count: 0, needs_review_count: 0 }
-  });
+  try {
+    const marketsRes = await pool.query(`
+      SELECT 
+        m.id as market_id,
+        m.name as official_market_name,
+        m.status as license_status,
+        m.created_at,
+        (m.created_at + INTERVAL '1 year')::text as license_expires_at,
+        'IQD' as currency
+      FROM public.markets m
+      WHERE m.id != 'SYSTEM_GLOBAL'
+      ORDER BY m.created_at DESC;
+    `);
+
+    const opsRecords: any[] = [];
+    let totalCount = 0, activeCount = 0, pendingCount = 0, suspendedCount = 0, revokedCount = 0, needsReviewCount = 0;
+
+    for (const m of marketsRes.rows) {
+      totalCount++;
+      const localM = db.markets?.find((dbM: any) => dbM.id === m.market_id);
+
+      const memsRes = await pool.query(`
+        SELECT 
+          mm.id as membership_id,
+          mm.user_id,
+          mm.role as manager_role,
+          mm.status as membership_status,
+          mm.created_at as membership_created_at,
+          mm.updated_at as membership_updated_at,
+          u.full_name as manager_name,
+          u.email as manager_email,
+          u.phone as manager_login_phone,
+          u.auth_user_id
+        FROM public.market_memberships mm
+        JOIN public.users u ON mm.user_id = u.id
+        WHERE mm.market_id = $1 AND mm.role IN ('OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER')
+        ORDER BY mm.created_at DESC;
+      `, [m.market_id]);
+
+      const ownerMemInRows = memsRes.rows.find((r: any) => r.manager_role === 'OWNER' || r.manager_role === 'MARKET_OWNER') || memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
+      const registeredPhone = ownerMemInRows?.manager_login_phone || localM?.registered_phone || localM?.owner_phone || '07501234567';
+
+      const tokensRes = await pool.query(`
+        SELECT id, user_id, status, expires_at, consumed_at, created_at
+        FROM public.activation_tokens
+        WHERE market_id = $1
+        ORDER BY created_at DESC;
+      `, [m.market_id]);
+
+      const primaryMem = memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
+      const pendingReplMem = memsRes.rows.find((r: any) => r.membership_status === 'PENDING_ACTIVATION' && primaryMem && r.user_id !== primaryMem.user_id);
+
+      let membershipStatus = primaryMem ? primaryMem.membership_status : 'PENDING_ACTIVATION';
+      let managerName = primaryMem ? primaryMem.manager_name : (localM?.owner_name || 'دیاری نەکراو');
+      let managerUserId = primaryMem ? primaryMem.user_id : `usr-${m.market_id}`;
+      let managerLoginPhone = primaryMem?.manager_login_phone || localM?.manager_login_phone || registeredPhone;
+      let managerEmail = primaryMem?.manager_email || localM?.owner_email || '';
+      let managerRole = primaryMem?.manager_role || 'MANAGER';
+      let membershipId = primaryMem?.membership_id || `mem-${m.market_id}`;
+
+      const token = tokensRes.rows.find((t: any) => t.user_id === managerUserId || t.status === 'PENDING');
+      let activationStatus = 'NONE';
+      let activationTokenId = token?.id;
+      let activationExpiresAt = token?.expires_at;
+
+      if (membershipStatus === 'PENDING_ACTIVATION') {
+        if (token) {
+          if (token.status === 'CONSUMED') activationStatus = 'ACTIVATED';
+          else if (token.status === 'REVOKED') activationStatus = 'REVOKED';
+          else if (new Date(token.expires_at) < new Date()) activationStatus = 'EXPIRED';
+          else activationStatus = 'READY';
+        } else {
+          activationStatus = 'READY';
+        }
+      } else if (membershipStatus === 'ACTIVE') {
+        activationStatus = 'ACTIVATED';
+      }
+
+      let authLinkageStatus = 'INCOMPLETE';
+      if (primaryMem && primaryMem.auth_user_id && !primaryMem.auth_user_id.startsWith('auth-usr-')) {
+        authLinkageStatus = 'LINKED';
+      } else if (membershipStatus === 'PENDING_ACTIVATION') {
+        authLinkageStatus = 'PENDING_ACTIVATION';
+      } else if (primaryMem?.auth_user_id) {
+        authLinkageStatus = 'LINKED';
+      }
+
+      const healthFlags: string[] = [];
+      if (membershipStatus === 'PENDING_ACTIVATION') {
+        healthFlags.push('PENDING_ACTIVATION');
+        pendingCount++;
+      }
+      if (membershipStatus === 'SUSPENDED') {
+        healthFlags.push('SUSPENDED');
+        suspendedCount++;
+      }
+      if (membershipStatus === 'REVOKED') {
+        healthFlags.push('REVOKED');
+        revokedCount++;
+      }
+      if (membershipStatus === 'ACTIVE') {
+        activeCount++;
+      }
+      if (activationStatus === 'EXPIRED') {
+        healthFlags.push('EXPIRED_ACTIVATION');
+      }
+      if (authLinkageStatus === 'INCOMPLETE' && membershipStatus === 'ACTIVE') {
+        healthFlags.push('MISSING_AUTH_LINK');
+      }
+      if (memsRes.rows.filter((r: any) => r.membership_status === 'ACTIVE').length > 1) {
+        healthFlags.push('AMBIGUOUS_MANAGER_RELATIONSHIP');
+      }
+
+      if (healthFlags.length > 0 && membershipStatus !== 'ACTIVE') {
+        needsReviewCount++;
+      }
+
+      let pendingReplacement = null;
+      if (pendingReplMem) {
+        const replToken = tokensRes.rows.find((t: any) => t.user_id === pendingReplMem.user_id && t.status === 'PENDING');
+        pendingReplacement = {
+          candidate_user_id: pendingReplMem.user_id,
+          candidate_name: pendingReplMem.manager_name,
+          candidate_login_phone: pendingReplMem.manager_login_phone || registeredPhone,
+          candidate_email: pendingReplMem.manager_email,
+          activation_token_id: replToken?.id,
+          activation_expires_at: replToken?.expires_at,
+          created_at: pendingReplMem.membership_created_at
+        };
+      }
+
+      opsRecords.push({
+        market_id: m.market_id,
+        official_market_name: m.official_market_name,
+        official_registered_phone: registeredPhone,
+        currency: m.currency,
+        license_status: m.license_status,
+        license_expires_at: m.license_expires_at,
+        created_at: m.created_at,
+        
+        manager_user_id: managerUserId,
+        manager_name: managerName,
+        manager_login_phone: managerLoginPhone,
+        manager_email: managerEmail,
+        manager_role: managerRole,
+
+        membership_id: membershipId,
+        membership_status: membershipStatus,
+        activation_status: activationStatus,
+        auth_linkage_status: authLinkageStatus,
+
+        activated_at: membershipStatus === 'ACTIVE' ? primaryMem?.membership_updated_at : null,
+        activation_token_id: activationTokenId,
+        activation_token_expires_at: activationExpiresAt,
+        pending_replacement: pendingReplacement,
+        health_flags: healthFlags
+      });
+    }
+
+    return res.json({
+      status: 'success',
+      data: {
+        items: opsRecords,
+        total: opsRecords.length,
+        page: 1,
+        pageSize: 20
+      },
+      summary: {
+        total_accounts: totalCount,
+        active_count: activeCount,
+        pending_activation_count: pendingCount,
+        suspended_count: suspendedCount,
+        revoked_count: revokedCount,
+        needs_review_count: needsReviewCount
+      }
+    });
+  } catch (err) {
+    console.error('Failed querying account operations:', err);
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'کێشە لە پەیوەندی بە بنکەی زانیاری'
+    });
+  }
 });
 
 // 2. Suspend Manager
@@ -7010,6 +7032,14 @@ async function startServer() {
     '/balance/*',
     '/customer-balance/*'
   ];
+
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      status: 'error',
+      code: 'ENDPOINT_NOT_FOUND',
+      message: 'API route not found'
+    });
+  });
 
   if (hasBuild || process.env.NODE_ENV === 'production') {
     app.use(express.static(distPath));

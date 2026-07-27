@@ -115,25 +115,31 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
     try {
       const [resOverview, resMarkets, resManagers] = await Promise.all([
         fetch('/api/platform/overview', { headers: getAuthHeaders() }).then(async r => {
-          if (!r.ok) return null;
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) return { status: 'error', message: 'وەڵامی سێرڤەر بە شێوازی JSON نەنێردراوە' };
           const text = await r.text();
-          try { return JSON.parse(text); } catch { return null; }
-        }).catch(() => null),
+          try { return JSON.parse(text); } catch { return { status: 'error', message: 'وەڵامی سێرڤەر نادروستە' }; }
+        }).catch(() => ({ status: 'error', message: 'پەیوەندی بە سێرڤەرەوە پچڕا' })),
         fetch('/api/platform/markets', { headers: getAuthHeaders() }).then(async r => {
-          if (!r.ok) return null;
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) return { status: 'error', message: 'وەڵامی سێرڤەر بە شێوازی JSON نەنێردراوە' };
           const text = await r.text();
-          try { return JSON.parse(text); } catch { return null; }
-        }).catch(() => null),
+          try { return JSON.parse(text); } catch { return { status: 'error', message: 'وەڵامی سێرڤەر نادروستە' }; }
+        }).catch(() => ({ status: 'error', message: 'پەیوەندی بە سێرڤەرەوە پچڕا' })),
         fetch('/api/platform/managers', { headers: getAuthHeaders() }).then(async r => {
-          if (!r.ok) return null;
+          const ct = r.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) return { status: 'error', message: 'وەڵامی سێرڤەر بە شێوازی JSON نەنێردراوە' };
           const text = await r.text();
-          try { return JSON.parse(text); } catch { return null; }
-        }).catch(() => null)
+          try { return JSON.parse(text); } catch { return { status: 'error', message: 'وەڵامی سێرڤەر نادروستە' }; }
+        }).catch(() => ({ status: 'error', message: 'پەیوەندی بە سێرڤەرەوە پچڕا' }))
       ]);
 
-      if (resOverview?.status === 'success') {
+      if (resOverview?.status === 'success' && resOverview.data) {
         setOverview(resOverview.data);
+      } else if (resOverview?.status === 'error') {
+        setActionMessage({ text: resOverview.message || 'هەڵە لە وەرگرتنی ئاماری سەرەکی', type: 'error' });
       }
+
       if (resMarkets?.status === 'success') {
         const d = resMarkets.data;
         if (Array.isArray(d)) {
@@ -142,6 +148,7 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
           setMarkets(d.items);
         }
       }
+
       if (resManagers?.status === 'success') {
         const d = resManagers.data;
         if (Array.isArray(d)) {
