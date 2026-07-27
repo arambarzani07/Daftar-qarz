@@ -96,6 +96,17 @@ export async function initPostgresSchema() {
         ALTER TABLE public.audit_logs DROP CONSTRAINT IF EXISTS fk_audit_approval;
         ALTER TABLE public.audit_logs DROP CONSTRAINT IF EXISTS fk_audit_ledger;
       `).catch(() => {});
+
+      // Gate 5: Forward-only migration to normalize legacy manager roles in public.market_memberships to MARKET_MANAGER
+      await client.query(`
+        ALTER TABLE public.market_memberships DROP CONSTRAINT IF EXISTS market_memberships_role_check;
+        ALTER TABLE public.market_memberships ADD CONSTRAINT market_memberships_role_check CHECK (role IN ('OWNER', 'MANAGER', 'MARKET_MANAGER', 'EMPLOYEE', 'PLATFORM_OWNER', 'MARKET_OWNER'));
+        UPDATE public.market_memberships
+        SET role = 'MARKET_MANAGER'
+        WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER');
+      `).catch((err) => {
+        console.error('Failed normalizing market_memberships roles:', err);
+      });
     } finally {
       client.release();
     }
@@ -1072,25 +1083,9 @@ function normalizePhone(p: string): string {
   return cleaned;
 }
 
-// System user authorization finder
-function findSystemUser(identity: string): SystemUser | undefined {
-  if (!identity) return undefined;
-  const trimmed = identity.trim();
-  const normInput = normalizePhone(trimmed);
-
-  return db.system_users.find((u) => {
-    if (u.phone) {
-      const normUserPhone = normalizePhone(u.phone);
-      if (normUserPhone && normInput && normUserPhone === normInput) {
-        return true;
-      }
-      if (u.phone.trim() === trimmed) return true;
-    }
-    if (u.id === trimmed || (u.name && u.name.toLowerCase() === trimmed.toLowerCase())) {
-      return true;
-    }
-    return false;
-  });
+// Legacy findSystemUser removed per Gate 1 & Gate 2 (Supabase Auth & PostgreSQL are sole authorities)
+function findSystemUser(_identity: string): SystemUser | undefined {
+  return undefined;
 }
 
 // Helper functions for immutable balance calculation
@@ -2785,8 +2780,157 @@ Input text: "${text}"`;
 // AUTHENTICATION GATEWAY CONTRACT ENDPOINTS (AUTH-1)
 // =========================================================
 
-// Step 1: Identify phone/email against system owner authorized list or customers list
-app.post('/api/auth/identify', (req, res) => {
+// =========================================================
+// AUTHENTICATION GATEWAY CONTRACT ENDPOINTS (AUTH-1)
+// =========================================================
+
+// Canonical Auth Context Resolver Service
+export interface AuthContextResult {
+  identity: {
+    authUserId: string;
+    publicUserId: string | null;
+  };
+  contexts: Array<{
+    persona: 'PLATFORM_OWNER' | 'MARKET_MANAGER' | 'EMPLOYEE' | 'CUSTOMER';
+    context_id: string;
+    tenant_id: string;
+    marketId: string;
+    customer_id?: string;
+    customerId?: string;
+    tenant_name: string;
+    role: string;
+    role_label_ku: string;
+    permissions: string[];
+  }>;
+  defaultContext: any;
+}
+
+export async function resolveAuthContext(verifiedSupabaseUid: string): Promise<AuthContextResult | null> {
+  if (!verifiedSupabaseUid || typeof verifiedSupabaseUid !== 'string' || !pool) {
+    return null;
+  }
+
+  // 1. Query public.users for EXACT auth_user_id match
+  const userRes = await pool.query(`
+    SELECT id, auth_user_id, full_name, email, phone, is_active
+    FROM public.users
+    WHERE auth_user_id::text = $1::text AND is_active = true
+  `, [verifiedSupabaseUid]);
+
+  const user = userRes.rows[0];
+
+  // 2. Check Platform Owner
+  // Gate 4: verified Supabase UID -> public.users.auth_user_id exact match -> public.platform_access.user_id -> role = PLATFORM_OWNER -> status = ACTIVE
+  let isPlatformOwner = false;
+  if (user) {
+    const paRes = await pool.query(`
+      SELECT pa.id
+      FROM public.platform_access pa
+      WHERE pa.user_id::text = $1::text AND pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
+    `, [user.id]);
+    isPlatformOwner = paRes.rows.length > 0;
+  }
+
+  const contexts: any[] = [];
+
+  if (isPlatformOwner) {
+    // Gate 4 & Gate 12: Platform Owner has ZERO tenant memberships. tenant_id = SYSTEM_GLOBAL ONLY.
+    contexts.push({
+      persona: 'PLATFORM_OWNER',
+      context_id: 'mem-platform-owner',
+      tenant_id: 'SYSTEM_GLOBAL',
+      marketId: 'SYSTEM_GLOBAL',
+      tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
+      role: 'PLATFORM_OWNER',
+      role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
+      permissions: ['ALL']
+    });
+
+    return {
+      identity: {
+        authUserId: verifiedSupabaseUid,
+        publicUserId: user ? user.id : null
+      },
+      contexts,
+      defaultContext: contexts[0]
+    };
+  }
+
+  // 3. Query market memberships for staff/managers
+  // Gate 5: Manager canonical role: MARKET_MANAGER, Employee canonical role: EMPLOYEE
+  if (user) {
+    const mmRes = await pool.query(`
+      SELECT mm.id as context_id, mm.market_id, mm.role, mm.permissions, mm.status, m.name as market_name
+      FROM public.market_memberships mm
+      JOIN public.markets m ON m.id = mm.market_id
+      WHERE mm.user_id::text = $1::text AND mm.status = 'ACTIVE'
+    `, [user.id]);
+
+    for (const mm of mmRes.rows) {
+      let perms: string[] = [];
+      if (Array.isArray(mm.permissions)) perms = mm.permissions;
+      else if (typeof mm.permissions === 'string') {
+        try { perms = JSON.parse(mm.permissions); } catch { perms = []; }
+      }
+
+      const roleUpper = (mm.role || '').toUpperCase();
+      const isEmp = roleUpper === 'EMPLOYEE';
+      const canonicalRole = isEmp ? 'EMPLOYEE' : 'MARKET_MANAGER';
+
+      contexts.push({
+        persona: isEmp ? 'EMPLOYEE' : 'MARKET_MANAGER',
+        context_id: mm.context_id,
+        tenant_id: mm.market_id,
+        marketId: mm.market_id,
+        tenant_name: mm.market_name,
+        role: canonicalRole,
+        role_label_ku: isEmp ? 'کارمەند' : 'بەڕێوەبەری مارکێت',
+        permissions: isEmp ? perms : ['ALL', ...APPROVED_PERMISSIONS]
+      });
+    }
+  }
+
+  // 4. Query customer auth links
+  // Gate 8: verified Supabase UID -> ACTIVE public.customer_auth_links -> exact market_id & customer_id
+  const calRes = await pool.query(`
+    SELECT cal.id as context_id, cal.market_id, cal.customer_id, cal.status, m.name as market_name, c.name as customer_name
+    FROM public.customer_auth_links cal
+    JOIN public.markets m ON m.id = cal.market_id
+    JOIN public.customers c ON c.id = cal.customer_id AND c.market_id = cal.market_id
+    WHERE cal.auth_user_id::text = $1::text AND cal.status = 'ACTIVE'
+  `, [verifiedSupabaseUid]);
+
+  for (const cal of calRes.rows) {
+    contexts.push({
+      persona: 'CUSTOMER',
+      context_id: cal.context_id,
+      tenant_id: cal.market_id,
+      marketId: cal.market_id,
+      customer_id: cal.customer_id,
+      customerId: cal.customer_id,
+      tenant_name: cal.market_name,
+      role: 'CUSTOMER',
+      role_label_ku: 'کڕیار',
+      permissions: ['VIEW_OWN_ACCOUNT']
+    });
+  }
+
+  if (contexts.length === 0) {
+    return null;
+  }
+
+  return {
+    identity: {
+      authUserId: verifiedSupabaseUid,
+      publicUserId: user ? user.id : null
+    },
+    contexts,
+    defaultContext: contexts[0]
+  };
+}
+
+// Step 1: Identify phone/email against PostgreSQL users or customer_auth_links
+app.post('/api/auth/identify', async (req, res) => {
   const { identity } = req.body;
   if (!identity || typeof identity !== 'string') {
     return res.status(400).json({
@@ -2796,52 +2940,68 @@ app.post('/api/auth/identify', (req, res) => {
   }
 
   const trimmed = identity.trim();
-  const user = findSystemUser(trimmed);
 
-  if (user) {
-    if (user.status === 'INACTIVE') {
-      return res.status(403).json({
-        status: 'error',
-        code: 'ACCOUNT_DISABLED',
-        message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
-      });
-    }
-    return res.json({
-      status: 'success',
-      data: {
-        identity: user.phone || trimmed,
-        userName: user.name,
-        auth_method: 'PASSWORD'
-      }
+  if (!pool) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'DATABASE_UNAVAILABLE',
+      message: 'بنکەی زانیاری دەستنەکەوت'
     });
   }
 
-  // Check if it's a customer
-  const customer = db.customers.find(c => c.phone && c.phone.trim() === trimmed);
-  if (customer) {
-    if (!customer.password) {
-      return res.status(401).json({
-        status: 'error',
-        code: 'NOT_AUTHORIZED_BY_OWNER',
-        message: 'ئەم کڕیارە وشەی نهێنی بۆ تۆمار نەکراوە و ڕێگەپێدراو نییە.'
+  try {
+    const userCheck = await pool.query(`
+      SELECT full_name, is_active FROM public.users
+      WHERE (phone = $1 OR email = $1 OR email = $2)
+    `, [trimmed, `${trimmed}@zhirox.com`]);
+
+    if (userCheck.rows.length > 0) {
+      const u = userCheck.rows[0];
+      if (!u.is_active) {
+        return res.status(403).json({
+          status: 'error',
+          code: 'ACCOUNT_DISABLED',
+          message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
+        });
+      }
+      return res.json({
+        status: 'success',
+        data: {
+          identity: trimmed,
+          userName: u.full_name,
+          auth_method: 'PASSWORD'
+        }
       });
     }
-    return res.json({
-      status: 'success',
-      data: {
-        identity: customer.phone,
-        userName: customer.name,
-        auth_method: 'PASSWORD',
-        is_customer: true
-      }
-    });
-  }
 
-  return res.status(401).json({
-    status: 'error',
-    code: 'NOT_AUTHORIZED_BY_OWNER',
-    message: 'ئەم ژمارە مۆبایلە لە لایەن خاوەنی سیستەمەوە یان کڕیارەکان ڕێگەپێنەدراوە.'
-  });
+    const calCheck = await pool.query(`
+      SELECT c.name, cal.status
+      FROM public.customer_auth_links cal
+      JOIN public.customers c ON c.id = cal.customer_id AND c.market_id = cal.market_id
+      WHERE (c.phone = $1 OR c.address = $1)
+    `, [trimmed]);
+
+    if (calCheck.rows.length > 0) {
+      return res.json({
+        status: 'success',
+        data: {
+          identity: trimmed,
+          userName: calCheck.rows[0].name,
+          auth_method: 'PASSWORD',
+          is_customer: true
+        }
+      });
+    }
+
+    return res.status(401).json({
+      status: 'error',
+      code: 'NOT_AUTHORIZED_BY_OWNER',
+      message: 'ئەم ژمارە مۆبایلە لە لایەن خاوەنی سیستەمەوە یان کڕیارەکان ڕێگەپێنەدراوە.'
+    });
+  } catch (err) {
+    console.error('Error during auth identify:', err);
+    return res.status(500).json({ status: 'error', message: 'خەتای سێرڤەر' });
+  }
 });
 
 // Helper to check foreign market authorization
@@ -2875,8 +3035,8 @@ function checkForeignMarketAccess(req: express.Request, res: express.Response): 
   return true;
 }
 
-// Step 2: Login with Password
-app.post('/api/auth/login', async (req, res) => {
+// Canonical Login Handler Endpoint (POST /api/auth/login)
+const handleLogin = async (req: express.Request, res: express.Response) => {
   const { identity, password } = req.body;
   if (!identity || !password) {
     return res.status(400).json({
@@ -2885,465 +3045,81 @@ app.post('/api/auth/login', async (req, res) => {
     });
   }
 
-  const trimmedPhone = identity.trim();
+  const trimmedIdentity = (identity || '').trim();
 
-  // 1. Authenticate with Supabase Auth
+  if (!supabase) {
+    return res.status(503).json({
+      status: 'error',
+      code: 'AUTH_UNAVAILABLE',
+      message: 'خزمەتگوزاری چوونەژوورەوەی Supabase دەستنەکەوت'
+    });
+  }
+
+  // 1. Authenticate strictly with Supabase Auth
   let sessionToken: string | null = null;
   let authUid: string | null = null;
 
-  if (supabase) {
-    try {
-      const isEmail = trimmedPhone.includes('@');
-      let authRes;
-      if (isEmail) {
-        authRes = await supabase.auth.signInWithPassword({
-          email: trimmedPhone,
-          password
-        });
-      } else {
-        authRes = await supabase.auth.signInWithPassword({
-          phone: trimmedPhone.replace(/\s+/g, ''),
-          password
-        });
-      }
-
-      if (authRes.data?.session?.access_token) {
-        sessionToken = authRes.data.session.access_token;
-        authUid = authRes.data.session.user.id;
-      } else if (authRes.error) {
-        console.warn('Supabase Auth signInWithPassword error:', authRes.error.message);
-      }
-    } catch (e) {
-      console.error('Supabase Auth user lookup error on login:', e);
+  try {
+    const isEmail = trimmedIdentity.includes('@');
+    let authRes;
+    if (isEmail) {
+      authRes = await supabase.auth.signInWithPassword({
+        email: trimmedIdentity,
+        password
+      });
+    } else {
+      authRes = await supabase.auth.signInWithPassword({
+        phone: trimmedIdentity.replace(/\s+/g, ''),
+        password
+      });
     }
+
+    if (authRes.data?.session?.access_token) {
+      sessionToken = authRes.data.session.access_token;
+      authUid = authRes.data.session.user.id;
+    }
+  } catch (e) {
+    console.error('Supabase Auth error during login:', e);
   }
 
+  // Gate 1 & Gate 15: If Supabase Auth fails or returns no session, return generic 401. NEVER fallback to local passwords.
   if (!sessionToken || !authUid) {
     return res.status(401).json({
       status: 'error',
+      code: 'INVALID_CREDENTIALS',
       message: 'ژمارەی مۆبایل/ئیمەیڵ یان وشەی نهێنی هەڵەیە'
     });
   }
 
-  // Check PostgreSQL users & memberships
-  if (pool) {
-    try {
-      // 0. Prioritize platform owner check
-      const poRes = await pool.query(`
-        SELECT u.id as user_id, u.auth_user_id, u.full_name, u.is_active
-        FROM public.platform_access pa
-        JOIN public.users u ON pa.user_id = u.id
-        WHERE ((u.auth_user_id::text = $1::text AND $1::text IS NOT NULL) 
-           OR u.email = $2 
-           OR u.email = $3
-           OR u.phone = $2
-           OR u.id::text = $2)
-          AND pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
-      `, [authUid, trimmedPhone, `${trimmedPhone}@zhirox.com`]);
-
-      if (poRes.rows.length > 0) {
-        const poUser = poRes.rows[0];
-        if (!poUser.is_active) {
-          return res.status(403).json({
-            status: 'error',
-            code: 'ACCOUNT_DISABLED',
-            message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
-          });
-        }
-        return res.json({
-          status: 'success',
-          data: {
-            session_token: sessionToken,
-            identity: trimmedPhone,
-            userName: poUser.full_name || 'خاوەنی سیستەم',
-            auth_uid: poUser.auth_user_id,
-            activeContext: {
-              context_id: 'mem-platform-owner',
-              tenant_id: 'SYSTEM_GLOBAL',
-              tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-              role: 'PLATFORM_OWNER',
-              role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-              permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-            }
-          }
-        });
-      }
-
-      const pgRes = await pool.query(`
-        SELECT 
-          u.id as user_id,
-          u.auth_user_id,
-          u.full_name,
-          u.is_active as user_active,
-          mm.id as membership_id,
-          mm.market_id,
-          mm.role,
-          mm.status as membership_status,
-          m.name as market_name
-        FROM public.users u
-        LEFT JOIN public.market_memberships mm ON mm.user_id = u.id
-        LEFT JOIN public.markets m ON m.id = mm.market_id
-        WHERE ((u.auth_user_id::text = $1::text AND $1::text IS NOT NULL) OR u.id::text = $2 OR u.email = $3 OR u.full_name = $2 OR u.phone = $2)
-      `, [authUid, trimmedPhone, `${trimmedPhone}@zhirox.com`]);
-
-      if (pgRes.rows.length > 0) {
-        const row = pgRes.rows[0];
-        if (!row.user_active) {
-          return res.status(403).json({
-            status: 'error',
-            code: 'ACCOUNT_DISABLED',
-            message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
-          });
-        }
-
-        if (row.membership_status && row.membership_status !== 'ACTIVE') {
-          return res.status(403).json({
-            status: 'error',
-            code: 'ACCOUNT_NOT_ACTIVATED',
-            message: 'ئەم هەژمارە تا ئێستا چالاک نەکراوە یان بەستەری چالاککردنەوەی بەکارنەهاتووە'
-          });
-        }
-
-        let isPlatformOwner = row.role === 'PLATFORM_OWNER';
-        if (!isPlatformOwner && pool && row.user_id) {
-          const paCheck = await pool.query(`
-            SELECT 1 FROM public.platform_access
-            WHERE user_id::text = $1::text AND role = 'PLATFORM_OWNER' AND status = 'ACTIVE'
-          `, [row.user_id]);
-          isPlatformOwner = paCheck.rows.length > 0;
-        }
-
-        return res.json({
-          status: 'success',
-          data: {
-            session_token: isPlatformOwner ? 'zhirox_platform_owner_session' : ('zhirox_session_user_' + row.user_id + '_' + Date.now()),
-            identity: trimmedPhone,
-            userName: row.full_name,
-            auth_uid: row.auth_user_id,
-            activeContext: isPlatformOwner ? {
-              context_id: 'mem-platform-owner',
-              tenant_id: 'SYSTEM_GLOBAL',
-              tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-              role: 'PLATFORM_OWNER',
-              role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-              permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-            } : {
-              context_id: row.membership_id || ('ctx-' + row.user_id),
-              tenant_id: row.market_id || '',
-              tenant_name: row.market_name || 'سوپەرمارکێتی ژیرۆکس',
-              role: row.role || 'MANAGER',
-              role_label_ku: row.role === 'OWNER' ? 'خاوەن شوێن' : 'بەڕێوەبەر',
-              permissions: ['ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER']
-            }
-          }
-        });
-      }
-    } catch (dbErr) {
-      console.error('PostgreSQL query error during login:', dbErr);
-    }
-  }
-
-  // System User / In-memory Fallback
-  const user = findSystemUser(identity);
-  if (user) {
-    if (user.status === 'INACTIVE') {
-      return res.status(403).json({
-        status: 'error',
-        code: 'ACCOUNT_DISABLED',
-        message: 'ئەم هەژمارە لە لایەن خاوەنی سیستەمەوە ناچالاک کراوە'
-      });
-    }
-
-    if (user.status === 'PENDING_ACTIVATION') {
-      return res.status(403).json({
-        status: 'error',
-        code: 'ACCOUNT_NOT_ACTIVATED',
-        message: 'ئەم هەژمارە تا ئێستا چالاک نەکراوە'
-      });
-    }
-
-    if (user.password && user.password !== password) {
-      return res.status(401).json({
-        status: 'error',
-        code: 'INVALID_CREDENTIALS',
-        message: 'وشەی نهێنی (پاسۆرد) هەڵەیە. ڕێگەپێدراو نیت بۆ چوونەژوورەوە.'
-      });
-    }
-
-    let isPlatformOwner = user.role === 'PLATFORM_OWNER';
-    if (!isPlatformOwner && db.platform_access && db.users) {
-      isPlatformOwner = db.platform_access.some(p => p.user_id === user.id && p.role === 'PLATFORM_OWNER' && p.status === 'ACTIVE');
-    }
-
-    return res.json({
-      status: 'success',
-      data: {
-        session_token: isPlatformOwner ? 'zhirox_platform_owner_session' : ('zhirox_session_user_' + user.id + '_' + Date.now()),
-        identity: user.phone,
-        userName: user.name,
-        auth_uid: `auth-${user.id}`,
-        activeContext: isPlatformOwner ? {
-          context_id: 'mem-platform-owner',
-          tenant_id: 'SYSTEM_GLOBAL',
-          tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-          role: 'PLATFORM_OWNER',
-          role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-          permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-        } : (() => {
-          let assignedMarket = db.markets?.find((m: any) => m.owner_phone === user.phone || m.owner_name === user.name);
-          if (!assignedMarket && db.markets?.length > 0) {
-            assignedMarket = db.markets.find((m: any) => m.owner_phone && user.phone && m.owner_phone.trim() === user.phone.trim()) || db.markets[0];
-          }
-          const tenantId = assignedMarket ? assignedMarket.id : '';
-          const tenantName = assignedMarket ? assignedMarket.name : 'سوپەرمارکێتی ژیرۆکس';
-          return {
-            context_id: 'ctx-' + user.id,
-            tenant_id: tenantId,
-            tenant_name: tenantName,
-            role: user.role,
-            role_label_ku: user.role === 'MARKET_OWNER' ? 'خاوەن شوێن' : user.role === 'MANAGER' ? 'بەڕێوەبەر' : 'کارمەند',
-            permissions: user.permissions || ['ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER']
-          };
-        })()
-      }
+  // 2. Resolve business authorization context strictly via PostgreSQL using authUid
+  const authCtx = await resolveAuthContext(authUid);
+  if (!authCtx || authCtx.contexts.length === 0) {
+    return res.status(403).json({
+      status: 'error',
+      code: 'ACCESS_DENIED',
+      message: 'ئەم هەژمارە دەستگەیشتنی نییە بۆ سیستەم (403 Access Denied)'
     });
   }
 
-  // Check customer login
-  const customer = db.customers.find(c => c.phone && c.phone.trim() === identity.trim());
-  if (customer) {
-    if (!customer.password || customer.password !== password) {
-      return res.status(401).json({
-        status: 'error',
-        code: 'INVALID_CREDENTIALS',
-        message: 'وشەی نهێنی کڕیار هەڵەیە یان تۆمار نەکراوە.'
-      });
-    }
-
-    return res.json({
-      status: 'success',
-      data: {
-        session_token: 'zhirox_cust_session_' + Date.now(),
-        identity: customer.phone,
-        userName: customer.name,
-        activeContext: {
-          context_id: 'ctx-cust-' + customer.id,
-          tenant_id: customer.market_id,
-          tenant_name: customer.name,
-          role: 'CUSTOMER',
-          role_label_ku: 'کڕیار',
-          customer_id: customer.id,
-          permissions: ['VIEW_OWN_ACCOUNT']
-        }
-      }
-    });
-  }
-
-  return res.status(401).json({
-    status: 'error',
-    code: 'NOT_AUTHORIZED_BY_OWNER',
-    message: 'ئەم ژمارە مۆبایلە بوونی نییە یاخود وشەی نهێنی هەڵەیە.'
-  });
-});
-
-// System Users Management APIs (System Owner Configured Accounts)
-app.get('/api/system-users', (req, res) => {
-  res.json({
+  return res.json({
     status: 'success',
-    data: db.system_users.map(u => ({
-      id: u.id,
-      name: u.name,
-      phone: u.phone,
-      role: u.role,
-      status: u.status,
-      permissions: u.permissions || ['ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER'],
-      created_at: u.created_at
-    }))
-  });
-});
-
-app.post('/api/system-users', async (req, res) => {
-  const { name, phone, password, role, permissions } = req.body;
-  if (!name || !phone || !password) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'تکایە ناو، ژمارەی مۆبایل، و پاسۆرد پڕبکەرەوە'
-    });
-  }
-
-  const existing = findSystemUser(phone);
-  if (existing) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'ئەم ژمارە مۆبایلە پێشتر لە لایەن خاوەنی سیستەمەوە دانراوە'
-    });
-  }
-
-  // Create user in Supabase Auth if active
-  if (supabase) {
-    try {
-      await supabase.auth.admin.createUser({
-        phone: phone.trim(),
-        password: password.trim(),
-        phone_confirm: true,
-        user_metadata: { full_name: name.trim() }
-      });
-    } catch (err) {
-      console.error('Failed creating system user in Supabase Auth:', err);
+    data: {
+      session_token: sessionToken,
+      identity: trimmedIdentity,
+      userName: authCtx.defaultContext.tenant_name,
+      auth_uid: authUid,
+      activeContext: authCtx.defaultContext,
+      contexts: authCtx.contexts
     }
-  }
-
-  const newUser: SystemUser = {
-    id: 'usr-' + Date.now(),
-    name: name.trim(),
-    phone: phone.trim(),
-    role: role || 'EMPLOYEE',
-    status: 'ACTIVE',
-    permissions: Array.isArray(permissions) ? permissions : ['ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER'],
-    created_at: new Date().toISOString()
-  };
-
-  db.system_users.push(newUser);
-  saveDb(db);
-
-  res.json({
-    status: 'success',
-    data: newUser
   });
-});
+};
 
-app.put('/api/system-users/:id', async (req, res) => {
-  const { id } = req.params;
-  const { name, phone, password, role, status, permissions } = req.body;
+app.post('/api/auth/login', handleLogin);
 
-  const idx = db.system_users.findIndex(u => u.id === id);
-  if (idx === -1) {
-    return res.status(404).json({ status: 'error', message: 'بەکارهێنەر نەدۆزرایەوە' });
-  }
+// Platform Owner Direct Authentication Endpoint (Gate 10: Thin wrapper delegating to handleLogin)
+app.post('/api/auth/login-platform-owner', handleLogin);
 
-  if (name) db.system_users[idx].name = name.trim();
-  if (phone) db.system_users[idx].phone = phone.trim();
-  if (role) db.system_users[idx].role = role;
-  if (status) db.system_users[idx].status = status;
-  if (Array.isArray(permissions)) db.system_users[idx].permissions = permissions;
-
-  if (password && supabase) {
-    try {
-      const userPhone = db.system_users[idx].phone;
-      const { data: listData } = await supabase.auth.admin.listUsers();
-      const authUser = listData?.users.find((u: any) => u.phone === userPhone);
-      if (authUser) {
-        await supabase.auth.admin.updateUserById(authUser.id, { password: password.trim() });
-      }
-    } catch (err) {
-      console.error('Failed updating system user password in Supabase Auth:', err);
-    }
-  }
-
-  saveDb(db);
-
-  res.json({
-    status: 'success',
-    data: db.system_users[idx]
-  });
-});
-
-app.delete('/api/system-users/:id', (req, res) => {
-  const { id } = req.params;
-  if (db.system_users.length <= 1) {
-    return res.status(400).json({ status: 'error', message: 'ناتوانرێت تەنها هەژماری سەرەکی بسڕدرێتەوە' });
-  }
-
-  db.system_users = db.system_users.filter(u => u.id !== id);
-  saveDb(db);
-
-  res.json({ status: 'success', message: 'بەکارهێنەر بە سەرکەوتوویی سڕدرایەوە' });
-});
-
-// Step 2: Verify OTP
-app.post('/api/auth/verify-otp', (req, res) => {
-  const { identity, code } = req.body;
-  if (!identity || !code || code.length !== 6) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'کۆدەکە هەڵەیە یان کاتی بەسەرچووە'
-    });
-  }
-
-  res.status(401).json({
-    status: 'error',
-    code: 'INVALID_OTP',
-    message: 'کۆدی پشتڕاستکردنەوە هەڵەیە یان بەسەرچووە'
-  });
-});
-
-// Platform Owner Direct Authentication
-app.post('/api/auth/login-platform-owner', async (req, res) => {
-  const { password, identity } = req.body;
-  const cleanId = (identity || '').trim();
-
-  if (!password || !cleanId) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'تکایە هەژمار و وشەی نهێنی بنووسە'
-    });
-  }
-
-  if (supabase) {
-    try {
-      const isEmail = cleanId.includes('@');
-      let authRes;
-      if (isEmail) {
-        authRes = await supabase.auth.signInWithPassword({ email: cleanId, password });
-      } else {
-        authRes = await supabase.auth.signInWithPassword({ phone: cleanId.replace(/\s+/g, ''), password });
-      }
-
-      if (authRes.data?.session?.access_token) {
-        const sessionToken = authRes.data.session.access_token;
-        const authUid = authRes.data.session.user.id;
-
-        if (pool) {
-          const poRes = await pool.query(`
-            SELECT pa.status, u.id, u.auth_user_id, u.full_name
-            FROM public.platform_access pa
-            JOIN public.users u ON pa.user_id = u.id
-            WHERE (u.auth_user_id::text = $1::text OR u.id::text = $1::text)
-              AND pa.role = 'PLATFORM_OWNER'
-              AND pa.status = 'ACTIVE'
-              AND u.is_active = true
-          `, [authUid]);
-
-          if (poRes.rows.length > 0) {
-            return res.json({
-              status: 'success',
-              session_token: sessionToken,
-              auth_user_id: authUid,
-              userName: poRes.rows[0].full_name || 'خاوەنی سیستەم',
-              activeContext: {
-                context_id: 'mem-platform-owner',
-                tenant_id: 'SYSTEM_GLOBAL',
-                tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-                role: 'PLATFORM_OWNER',
-                role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-                permissions: ['all', 'can_manage_markets', 'can_manage_licenses']
-              }
-            });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error verifying platform owner during login:', err);
-    }
-  }
-
-  return res.status(401).json({
-    status: 'error',
-    message: 'ژمارەی مۆبایل/ئیمەیڵ یان وشەی نهێنی خاوەنی سیستەم هەڵەیە'
-  });
-});
-
-// Authoritative Auth Context Resolver Endpoint (GET & POST /api/auth/context)
+// Authoritative Auth Context Resolver Endpoint (GET & POST /api/auth/context & POST /api/auth/resolve-identity)
 const handleAuthContext = async (req: express.Request, res: express.Response) => {
   const token = extractBearerToken(req);
   if (!token) {
@@ -3363,170 +3139,27 @@ const handleAuthContext = async (req: express.Request, res: express.Response) =>
     });
   }
 
-  const authUserId = verifiedUser.id;
-
-  if (!pool) {
-    return res.status(503).json({
+  const authCtx = await resolveAuthContext(verifiedUser.id);
+  if (!authCtx || authCtx.contexts.length === 0) {
+    return res.status(403).json({
       status: 'error',
-      code: 'DB_UNAVAILABLE',
-      message: 'Database unavailable'
+      code: 'NO_ACTIVE_CONTEXT',
+      message: 'ئەم هەژمارە ڕێگەپێدانی چالاکی نییە (403 Forbidden)'
     });
   }
 
-  try {
-    // Query customer auth links for exact authUserId
-    const calRes = await pool.query(`
-      SELECT cal.id as context_id, cal.market_id, cal.customer_id, cal.status, m.name as market_name, c.name as customer_name
-      FROM public.customer_auth_links cal
-      JOIN public.markets m ON m.id = cal.market_id
-      JOIN public.customers c ON c.id = cal.customer_id AND c.market_id = cal.market_id
-      WHERE cal.auth_user_id::text = $1::text AND cal.status = 'ACTIVE'
-    `, [authUserId]);
-
-    const userRes = await pool.query(`
-      SELECT id, auth_user_id, full_name, email, phone, is_active
-      FROM public.users
-      WHERE auth_user_id::text = $1::text OR id::text = $1::text
-    `, [authUserId]);
-
-    let user = userRes.rows[0];
-    if (!user && (authUserId === 'usr-platform-owner' || authUserId.includes('platform-owner'))) {
-      const poRes = await pool.query(`
-        SELECT u.id, u.auth_user_id, u.full_name, u.email, u.phone, u.is_active
-        FROM public.platform_access pa
-        JOIN public.users u ON pa.user_id = u.id
-        WHERE pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
-        LIMIT 1
-      `);
-      if (poRes.rows.length > 0) {
-        user = poRes.rows[0];
-      }
+  return res.json({
+    status: 'success',
+    data: {
+      identity: authCtx.identity,
+      contexts: authCtx.contexts,
+      defaultContext: authCtx.defaultContext
     }
-
-    if (!user && userRes.rows.length === 0 && calRes.rows.length === 0) {
-      return res.status(403).json({
-        status: 'error',
-        code: 'ACCOUNT_DISABLED',
-        message: 'ئەم هەژمارە ناچالاک کراوە یان بوونی نییە'
-      });
-    }
-
-    // Check platform_access for exact user
-    const paRes = user ? await pool.query(`
-      SELECT pa.id, pa.role, pa.status
-      FROM public.platform_access pa
-      WHERE pa.user_id::text = $1::text AND pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
-    `, [user.id]) : { rows: [] };
-
-    const isPlatformOwner = paRes.rows.length > 0;
-
-    // Query market memberships for exact user
-    const mmRes = user ? await pool.query(`
-      SELECT mm.id as context_id, mm.market_id, mm.role, mm.permissions, mm.status, m.name as market_name
-      FROM public.market_memberships mm
-      JOIN public.markets m ON m.id = mm.market_id
-      WHERE mm.user_id::text = $1::text AND mm.status = 'ACTIVE'
-    `, [user.id]) : { rows: [] };
-
-    const contexts: any[] = [];
-
-    if (isPlatformOwner) {
-      contexts.push({
-        persona: 'PLATFORM_OWNER',
-        context_id: 'mem-platform-owner',
-        tenant_id: 'SYSTEM_GLOBAL',
-        marketId: 'SYSTEM_GLOBAL',
-        tenant_name: 'سیستەمی سەرەکی ژیرۆکس (Platform Owner)',
-        role: 'PLATFORM_OWNER',
-        role_label_ku: 'خاوەنی سیستەم (Platform Owner)',
-        permissions: ['ALL']
-      });
-
-      // Include all registered markets so Platform Owner can inspect/switch context to any market
-      try {
-        const allMktsRes = pool ? await pool.query(`SELECT id, name FROM public.markets ORDER BY name ASC`) : { rows: db.markets || [] };
-        for (const mkt of (allMktsRes.rows || [])) {
-          if (mkt.id && mkt.id !== 'SYSTEM_GLOBAL') {
-            contexts.push({
-              persona: 'MARKET_MANAGER',
-              context_id: `ctx-po-${mkt.id}`,
-              tenant_id: mkt.id,
-              marketId: mkt.id,
-              tenant_name: mkt.name || 'سوپەرمارکێت',
-              role: 'PLATFORM_OWNER',
-              role_label_ku: 'خاوەنی سیستەم',
-              permissions: ['ALL']
-            });
-          }
-        }
-      } catch (mktErr) {
-        console.error('Failed to include markets for Platform Owner context:', mktErr);
-      }
-    }
-
-    for (const mm of mmRes.rows) {
-      let perms: string[] = [];
-      if (Array.isArray(mm.permissions)) perms = mm.permissions;
-      else if (typeof mm.permissions === 'string') {
-        try { perms = JSON.parse(mm.permissions); } catch { perms = []; }
-      }
-
-      contexts.push({
-        persona: mm.role === 'EMPLOYEE' ? 'EMPLOYEE' : 'MARKET_MANAGER',
-        context_id: mm.context_id,
-        tenant_id: mm.market_id,
-        marketId: mm.market_id,
-        tenant_name: mm.market_name,
-        role: mm.role,
-        role_label_ku: mm.role === 'OWNER' || mm.role === 'MARKET_OWNER' ? 'خاوەن شوێن' : mm.role === 'MANAGER' ? 'بەڕێوەبەر' : 'کارمەند',
-        permissions: mm.role === 'EMPLOYEE' ? perms : ['ALL']
-      });
-    }
-
-    for (const cal of calRes.rows) {
-      contexts.push({
-        persona: 'CUSTOMER',
-        context_id: cal.context_id,
-        tenant_id: cal.market_id,
-        marketId: cal.market_id,
-        customer_id: cal.customer_id,
-        customerId: cal.customer_id,
-        tenant_name: cal.market_name,
-        role: 'CUSTOMER',
-        role_label_ku: 'کڕیار',
-        permissions: ['VIEW_OWN_ACCOUNT']
-      });
-    }
-
-    if (contexts.length === 0) {
-      return res.status(403).json({
-        status: 'error',
-        code: 'NO_ACTIVE_CONTEXT',
-        message: 'ئەم هەژمارە ڕێگەپێدانی چالاکی نییە (403 Forbidden)'
-      });
-    }
-
-    return res.json({
-      status: 'success',
-      data: {
-        identity: {
-          authUserId,
-          publicUserId: user ? user.id : null
-        },
-        contexts,
-        defaultContext: contexts[0]
-      }
-    });
-  } catch (err) {
-    console.error('Error resolving auth context:', err);
-    return res.status(500).json({ status: 'error', message: 'خەتای سێرڤەر' });
-  }
+  });
 };
 
 app.get('/api/auth/context', handleAuthContext);
 app.post('/api/auth/context', handleAuthContext);
-
-// Endpoint to resolve Supabase auth_user_id against authoritative market memberships table
 app.post('/api/auth/resolve-identity', handleAuthContext);
 
 // VERIFIED SUPABASE AUTHENTICATION & PLATFORM AUTHORITY HELPERS
@@ -6446,24 +6079,15 @@ app.post('/api/auth/activate', async (req, res) => {
     } catch (e) {}
   }
 
-  const sessionToken = 'zhirox_session_user_' + record.user_id + '_' + Date.now();
-  const activeContext = {
-    context_id: `ctx-${record.user_id}`,
-    tenant_id: record.market_id,
-    tenant_name: officialMarketName || 'سوپەرمارکێت',
-    role: record.role || 'MANAGER',
-    role_label_ku: record.role === 'OWNER' || record.role === 'MARKET_OWNER' ? 'خاوەن شوێن' : 'بەڕێوەبەر',
-    permissions: ['ALL']
-  };
-
   res.json({
     status: 'success',
     data: {
-      session_token: sessionToken,
-      activeContext,
-      contexts: [activeContext]
+      activated: true,
+      auth_user_id: authUserId,
+      market_id: record.market_id,
+      market_name: officialMarketName || 'سوپەرمارکێت'
     },
-    message: 'هەژمارەکەت بە سەرکەوتوویی چالاک کرا و چوویەتە نێو مارکێتەکەتەوە'
+    message: 'هەژمارەکەت بە سەرکەوتوویی چالاک کرا. تکایە بۆ چوونەژوورەوە وشەی نهێنیەکەت بەکاربهێنە'
   });
 });
 
