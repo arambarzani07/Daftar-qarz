@@ -7179,7 +7179,7 @@ async function startServer() {
   });
 }
 
-if (!process.env.NO_SERVER_LISTEN && (process.env.NODE_ENV !== 'test' || process.argv[1]?.includes('server'))) {
+if (process.env.NO_SERVER_LISTEN !== 'true' && process.env.NODE_ENV !== 'test' && !process.argv[1]?.includes('test') && !process.argv[1]?.includes('proof')) {
   startServer();
 }
 
