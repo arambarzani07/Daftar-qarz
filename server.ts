@@ -194,7 +194,7 @@ export interface Transaction {
   id: string;
   customer_id: string;
   market_id: string;
-  type: 'DEBT_ADD' | 'PAYMENT_RECEIVE' | 'DEBT_FORGIVE' | 'ADJUSTMENT';
+  type: 'DEBT_ADD' | 'PAYMENT_RECEIVE' | 'OPENING_BALANCE' | 'FORGIVENESS' | 'REVERSAL' | 'ADJUSTMENT_DEBIT' | 'ADJUSTMENT_CREDIT';
   amount: number;
   currency: 'IQD' | 'USD';
   note: string;
@@ -1314,8 +1314,8 @@ function calculateCustomerBalances(customerId: string) {
   let usd = 0;
 
   for (const t of customerTxs) {
-    const isDebt = t.type === 'DEBT_ADD' || (t.type as string) === 'OPENING_BALANCE';
-    const isPay = t.type === 'PAYMENT_RECEIVE' || (t.type as string) === 'FORGIVENESS' || (t.type as string) === 'ADJUSTMENT';
+    const isDebt = t.type === 'DEBT_ADD' || (t.type as string) === 'OPENING_BALANCE' || (t.type as string) === 'ADJUSTMENT_DEBIT';
+    const isPay = t.type === 'PAYMENT_RECEIVE' || (t.type as string) === 'FORGIVENESS' || (t.type as string) === 'ADJUSTMENT_CREDIT';
     const mult = isDebt ? 1 : isPay ? -1 : 0;
 
     if (t.currency === 'USD') {

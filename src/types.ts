@@ -1,6 +1,6 @@
 export type CurrencyType = 'IQD' | 'USD';
 
-export type TransactionType = 'DEBT_ADD' | 'PAYMENT_RECEIVE' | 'DEBT_FORGIVE' | 'ADJUSTMENT';
+export type TransactionType = 'DEBT_ADD' | 'PAYMENT_RECEIVE' | 'OPENING_BALANCE' | 'FORGIVENESS' | 'REVERSAL' | 'ADJUSTMENT_DEBIT' | 'ADJUSTMENT_CREDIT';
 
 export interface Customer {
   id: string;
