@@ -1074,7 +1074,7 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
     INSERT INTO public.customer_balances (
       id, market_id, customer_id, currency, balance, total_debt_added, total_payments_received, transaction_count, last_transaction_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4,
+      $1::text, $2::text, $3::text, $4::text,
       (
         SELECT COALESCE(SUM(
           CASE 
@@ -1091,7 +1091,7 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2 AND l.customer_id = $3 AND l.currency = $4
+        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
       ),
       (
         SELECT COALESCE(SUM(
@@ -1104,7 +1104,7 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2 AND l.customer_id = $3 AND l.currency = $4
+        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
       ),
       (
         SELECT COALESCE(SUM(
@@ -1117,13 +1117,13 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2 AND l.customer_id = $3 AND l.currency = $4
+        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
       ),
       (
-        SELECT COUNT(*) FROM public.ledger_entries WHERE market_id = $2 AND customer_id = $3 AND currency = $4
+        SELECT COUNT(*)::integer FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
       ),
       (
-        SELECT MAX(occurred_at) FROM public.ledger_entries WHERE market_id = $2 AND customer_id = $3 AND currency = $4
+        SELECT MAX(occurred_at) FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
       ),
       NOW()
     )
@@ -1326,6 +1326,329 @@ function calculateCustomerBalances(customerId: string) {
   }
 
   return { iqd, usd };
+}
+
+async function recalculateCustomerPromises(marketId: string, customerId: string, pgClient?: any) {
+  const client = pgClient || pool;
+  if (client) {
+    try {
+      const pRes = await client.query(
+        `SELECT * FROM public.payment_promises WHERE market_id = $1 AND customer_id = $2 AND status = 'PENDING'`,
+        [marketId, customerId]
+      );
+      for (const prom of pRes.rows) {
+        const payRes = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) as total_paid 
+           FROM public.ledger_entries 
+           WHERE market_id = $1 AND customer_id = $2 AND currency = $3 
+             AND entry_type = 'PAYMENT_RECEIVE' AND is_reversed = false 
+             AND occurred_at >= $4`,
+          [marketId, customerId, prom.currency, prom.created_at]
+        );
+        const totalPaid = Number(payRes.rows[0]?.total_paid || 0);
+        const promisedAmount = Number(prom.promised_amount ?? prom.amount ?? 0);
+        const pDate = prom.promise_date ?? prom.promised_date;
+
+        if (totalPaid >= promisedAmount) {
+          await client.query(
+            `UPDATE public.payment_promises SET status = 'KEPT', fulfilled_at = NOW() WHERE id = $1`,
+            [prom.id]
+          );
+        } else if (pDate && new Date(pDate) < new Date()) {
+          const newStatus = totalPaid > 0 ? 'PARTIALLY_KEPT' : 'BROKEN';
+          await client.query(
+            `UPDATE public.payment_promises SET status = $1 WHERE id = $2`,
+            [newStatus, prom.id]
+          );
+
+          if (newStatus === 'BROKEN') {
+            const caseRes = await client.query(
+              `SELECT id FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 AND status IN ('OPEN', 'IN_PROGRESS', 'WAITING') LIMIT 1`,
+              [marketId, customerId]
+            );
+            if (caseRes.rows.length > 0) {
+              const caseId = caseRes.rows[0].id;
+              await client.query(
+                `INSERT INTO public.recovery_activities (id, case_id, market_id, customer_id, activity_type, note, created_by, created_at)
+                 VALUES ($1, $2, $3, $4, 'PROMISE_BROKEN', $5, 'SYSTEM', NOW())`,
+                [`act-${Date.now()}-${Math.floor(Math.random()*1000)}`, caseId, marketId, customerId, `بەڵێنی پارەدانی ${promisedAmount} ${prom.currency} ڕێکەوتی ${pDate} شکا.`]
+              );
+              await client.query(
+                `UPDATE public.recovery_cases SET last_activity_at = NOW() WHERE id = $1`,
+                [caseId]
+              );
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error in recalculateCustomerPromises:', e);
+    }
+  }
+
+  if ((db as any).payment_promises) {
+    const memPromises = (db as any).payment_promises.filter((p: any) => p.customer_id === customerId && p.status === 'PENDING');
+    for (const prom of memPromises) {
+      const custTxs = db.transactions.filter(t => t.customer_id === customerId && t.currency === prom.currency && t.type === 'PAYMENT_RECEIVE' && !t.reversed && new Date(t.timestamp) >= new Date(prom.created_at));
+      const totalPaid = custTxs.reduce((sum, t) => sum + t.amount, 0);
+      if (totalPaid >= prom.amount) {
+        prom.status = 'KEPT';
+        prom.fulfilled_at = new Date().toISOString();
+      } else if (new Date(prom.promised_date) < new Date()) {
+        prom.status = totalPaid > 0 ? 'PARTIALLY_KEPT' : 'BROKEN';
+      }
+    }
+  }
+}
+
+async function evaluateDebtOperation(params: {
+  marketId: string;
+  customerId: string;
+  currency: 'IQD' | 'USD';
+  amount: number;
+  actorId: string;
+  actorRole: string;
+  approvalId?: string;
+  pgClient?: any;
+}): Promise<{
+  status: 'ALLOW' | 'DENY' | 'REQUIRES_APPROVAL';
+  code?: string;
+  message?: string;
+  approval_request_id?: string;
+  credit_limit?: number;
+  current_balance?: number;
+  projected_balance?: number;
+}> {
+  const { marketId, customerId, currency, amount, actorId, actorRole, approvalId, pgClient } = params;
+  const client = pgClient || pool;
+
+  let cust: any = null;
+  if (client) {
+    try {
+      const cRes = await client.query(`SELECT * FROM public.customers WHERE id = $1 AND market_id = $2`, [customerId, marketId]);
+      if (cRes.rows.length > 0) cust = cRes.rows[0];
+    } catch {}
+  }
+  if (!cust) {
+    cust = db.customers.find(c => c.id === customerId && c.market_id === marketId);
+  }
+  if (!cust) {
+    return { status: 'DENY', code: 'CUSTOMER_NOT_FOUND', message: 'کڕیار لەم مارکێتەدا نەدۆزرایەوە' };
+  }
+  if (cust.status === 'INACTIVE' || cust.status === 'ARCHIVED') {
+    return { status: 'DENY', code: 'CUSTOMER_INACTIVE', message: 'هەژماری ئەم کڕیارە ناچالاکە' };
+  }
+
+  let lockStatus = 'UNLOCKED';
+  let lockReason = '';
+  if (client) {
+    try {
+      const lockRes = await client.query(`SELECT debt_status, lock_reason FROM public.customer_debt_controls WHERE market_id = $1 AND customer_id = $2`, [marketId, customerId]);
+      if (lockRes.rows.length > 0) {
+        lockStatus = lockRes.rows[0].debt_status;
+        lockReason = lockRes.rows[0].lock_reason || '';
+      }
+    } catch {}
+  } else {
+    const cred = db.credit_settings.find(c => c.customer_id === customerId && c.market_id === marketId);
+    if (cred) lockStatus = cred.lock_status === 'LOCKED' ? 'LOCKED' : 'UNLOCKED';
+  }
+
+  let hasValidTempUnlock = false;
+  let tempUnlockRecord: any = null;
+  if (client) {
+    try {
+      const uRes = await client.query(
+        `SELECT * FROM public.temporary_debt_unlocks 
+         WHERE market_id = $1 AND customer_id = $2 AND status = 'ACTIVE' AND expires_at > NOW() 
+         ORDER BY created_at DESC LIMIT 1`,
+        [marketId, customerId]
+      );
+      if (uRes.rows.length > 0) {
+        tempUnlockRecord = uRes.rows[0];
+        const maxAmt = Number(tempUnlockRecord.maximum_amount ?? tempUnlockRecord.max_amount ?? 0);
+        if (maxAmt <= 0 || maxAmt >= amount) {
+          hasValidTempUnlock = true;
+        }
+      }
+    } catch (unlockErr) {
+      console.error('[EVAL DEBT UNLOCK ERROR]:', unlockErr);
+    }
+  } else if ((db as any).temporary_debt_unlocks) {
+    const memUnlock = (db as any).temporary_debt_unlocks.find((u: any) => u.market_id === marketId && u.customer_id === customerId && u.status === 'ACTIVE' && new Date(u.expires_at) > new Date());
+    if (memUnlock) {
+      const maxAmt = Number(memUnlock.maximum_amount ?? memUnlock.max_amount ?? 0);
+      if (maxAmt <= 0 || maxAmt >= amount) hasValidTempUnlock = true;
+    }
+  }
+
+  if (hasValidTempUnlock) {
+    return {
+      status: 'ALLOW',
+      code: 'TEMP_UNLOCK_ACTIVE',
+      message: 'ڕێگەپێدراوە بە بەکارهێنانی کردنەوەی کاتی'
+    };
+  }
+
+  if (lockStatus === 'LOCKED') {
+    return {
+      status: 'DENY',
+      code: 'CUSTOMER_LOCKED',
+      message: 'ئەم کڕیارە قەرزی بۆ قوفڵ کراوە.'
+    };
+  }
+
+  let creditLimit = 0;
+  let limitMode = 'NO_LIMIT';
+  if (client) {
+    try {
+      const credRes = await client.query(
+        `SELECT * FROM public.customer_credit_settings WHERE market_id = $1 AND customer_id = $2 AND currency = $3`,
+        [marketId, customerId, currency]
+      );
+      if (credRes.rows.length > 0) {
+        creditLimit = Number(credRes.rows[0].limit_amount || 0);
+        limitMode = credRes.rows[0].limit_mode || 'NO_LIMIT';
+      }
+    } catch {}
+  } else {
+    const cred = db.credit_settings.find(c => c.customer_id === customerId && c.market_id === marketId);
+    if (cred) {
+      creditLimit = currency === 'USD' ? cred.limit_usd : cred.limit_iqd;
+      limitMode = cred.policy === 'HARD' ? 'HARD_LIMIT' : cred.policy === 'SOFT' ? 'SOFT_LIMIT' : 'NO_LIMIT';
+    }
+  }
+
+  let currentBal = 0;
+  if (client) {
+    try {
+      const balRes = await client.query(
+        `SELECT balance FROM public.customer_balances WHERE market_id = $1 AND customer_id = $2 AND currency = $3`,
+        [marketId, customerId, currency]
+      );
+      if (balRes.rows.length > 0) {
+        currentBal = Number(balRes.rows[0].balance || 0);
+      }
+    } catch (err) {
+      console.error('[EVAL DEBT BAL ERROR]:', err);
+    }
+  } else {
+    const memBal = calculateCustomerBalances(customerId);
+    currentBal = currency === 'USD' ? memBal.usd : memBal.iqd;
+  }
+
+  const projectedBal = currentBal + amount;
+
+  if (creditLimit > 0 && projectedBal > creditLimit) {
+    if (approvalId) {
+      let apprRecord: any = null;
+      let debugInfo = '';
+      if (client) {
+        try {
+          const forUpdate = pgClient ? ' FOR UPDATE' : '';
+          let aRes = await client.query(
+            `SELECT * FROM public.approval_requests WHERE id = $1 AND market_id = $2${forUpdate}`,
+            [approvalId, marketId]
+          );
+          debugInfo += `[Q1 rows:${aRes.rows.length}]`;
+          if (aRes.rows.length === 0) {
+            aRes = await client.query(
+              `SELECT * FROM public.approval_requests WHERE id = $1${forUpdate}`,
+              [approvalId]
+            );
+            debugInfo += `[Q2 rows:${aRes.rows.length}]`;
+          }
+          if (aRes.rows.length > 0) apprRecord = aRes.rows[0];
+        } catch (err: any) {
+          debugInfo += `[Err:${err?.message}]`;
+          console.error('[EVAL DEBT SELECT ERROR]:', err);
+        }
+      } else {
+        debugInfo += '[No client]';
+      }
+      if (!apprRecord && (db as any).approval_requests) {
+        apprRecord = (db as any).approval_requests.find((a: any) => a.id === approvalId);
+        debugInfo += `[MemFound:${!!apprRecord}]`;
+      }
+
+      if (!apprRecord) {
+        return { status: 'DENY', code: 'APPROVAL_NOT_FOUND', message: `داواکاری پەسەندکردن نەدۆزرایەوە (looking for id=${approvalId}, marketId=${marketId})` };
+      }
+      if (apprRecord.status === 'CONSUMED' || apprRecord.status === 'EXECUTED') {
+        return { status: 'DENY', code: 'APPROVAL_REPLAY_DENIED', message: 'ئەم پەسەندکردنە پێشتر بەکارهاتووە' };
+      }
+      if (apprRecord.status !== 'APPROVED') {
+        return { status: 'DENY', code: 'APPROVAL_NOT_APPROVED', message: `پەسەندکردنەکە لە دۆخی (${apprRecord.status}) دایە` };
+      }
+      if (new Date(apprRecord.expires_at) < new Date()) {
+        return { status: 'DENY', code: 'APPROVAL_EXPIRED', message: 'ماوەی ئەم پەسەندکردنە بەسەرچووە' };
+      }
+      if (apprRecord.customer_id && apprRecord.customer_id !== customerId) {
+        return { status: 'DENY', code: 'CUSTOMER_TAMPERING_DENIED', message: 'کڕیاری پەسەندکراو ناگونجێت' };
+      }
+      if (apprRecord.currency && apprRecord.currency !== currency) {
+        return { status: 'DENY', code: 'CURRENCY_TAMPERING_DENIED', message: 'دراوی پەسەندکراو ناگونجێت' };
+      }
+      if (apprRecord.requested_amount && Number(apprRecord.requested_amount) !== amount) {
+        return { status: 'DENY', code: 'AMOUNT_TAMPERING_DENIED', message: 'بڕی پارەی پەسەندکراو ناگونجێت' };
+      }
+
+      return {
+        status: 'ALLOW',
+        credit_limit: creditLimit,
+        current_balance: currentBal,
+        projected_balance: projectedBal
+      };
+    }
+
+    if (limitMode === 'HARD_LIMIT') {
+      return {
+        status: 'DENY',
+        code: 'CREDIT_LIMIT_EXCEEDED',
+        message: `بڕی قەرز لە سنووری ڕێگەپێدراو (${creditLimit.toLocaleString()} ${currency}) تێدەپەڕێت.`,
+        credit_limit: creditLimit,
+        current_balance: currentBal,
+        projected_balance: projectedBal
+      };
+    } else {
+      return {
+        status: 'REQUIRES_APPROVAL',
+        code: 'CREDIT_LIMIT_EXCEEDED',
+        message: `ئەم بڕە لە سنووری قەرزی کڕیار (${creditLimit.toLocaleString()} ${currency}) زیاترە و پێویستی بە پەسەندکردن هەیە.`,
+        credit_limit: creditLimit,
+        current_balance: currentBal,
+        projected_balance: projectedBal
+      };
+    }
+  }
+
+  let policy: any = null;
+  if (client) {
+    try {
+      const pRes = await client.query(`SELECT * FROM public.market_protection_policies WHERE market_id = $1`, [marketId]);
+      if (pRes.rows.length > 0) policy = pRes.rows[0];
+    } catch {}
+  }
+
+  if (policy && actorRole === 'EMPLOYEE') {
+    const threshold = currency === 'USD' ? Number(policy.high_value_usd_threshold || 1000) : Number(policy.high_value_iqd_threshold || 1000000);
+    if (amount >= threshold && !approvalId) {
+      return {
+        status: 'REQUIRES_APPROVAL',
+        code: 'HIGH_VALUE_THRESHOLD_EXCEEDED',
+        message: `ئەم بڕە گەورەیە (${amount.toLocaleString()} ${currency}) پێویستی بە پەسەندکردنی بەڕێوەبەر هەیە.`,
+        current_balance: currentBal,
+        projected_balance: projectedBal
+      };
+    }
+  }
+
+  return {
+    status: 'ALLOW',
+    credit_limit: creditLimit,
+    current_balance: currentBal,
+    projected_balance: projectedBal
+  };
 }
 
 function logAudit(customerId: string, marketId: string, actionType: string, description: string, performedBy: string) {
@@ -1929,49 +2252,23 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
 
   // Credit Control Check on DEBT_ADD
   if (type === 'DEBT_ADD') {
-    const credit = db.credit_settings.find(c => c.customer_id === cust.id);
-    if (credit) {
-      if (credit.lock_status === 'LOCKED' && !req.body.override) {
-        let hasActiveUnlock = false;
-        if (pool) {
-          try {
-            const unlockRes = await pool.query(
-              `SELECT id FROM public.temporary_debt_unlocks WHERE customer_id = $1 AND status = 'ACTIVE' AND expires_at > NOW() LIMIT 1`,
-              [cust.id]
-            );
-            if (unlockRes.rows.length > 0) hasActiveUnlock = true;
-          } catch {}
-        }
-        if (!hasActiveUnlock && (db as any).temporary_debt_unlocks) {
-          const memUnlock = (db as any).temporary_debt_unlocks.find((u: any) => u.customer_id === cust.id && u.status === 'ACTIVE' && new Date(u.expires_at) > new Date());
-          if (memUnlock) hasActiveUnlock = true;
-        }
+    const evalRes = await evaluateDebtOperation({
+      marketId,
+      customerId: cust.id,
+      currency: validAmount.currency,
+      amount: validAmount.amount,
+      actorId: permCheck.userId || 'user',
+      actorRole: permCheck.role || 'EMPLOYEE',
+      approvalId: req.body.approval_id || req.body.approvalId
+    });
 
-        if (!hasActiveUnlock) {
-          return res.status(400).json({
-            status: 'error',
-            code: 'ACCOUNT_LOCKED',
-            message: 'هەژماری ئەم کڕیارە قفڵ کراوە. ناتوانرێت قەرزی نوێ تۆمار بكرێت.'
-          });
-        }
-      }
-      if (credit.policy === 'HARD' && !req.body.override) {
-        const currentBal = calculateCustomerBalances(cust.id);
-        if (validAmount.currency === 'IQD' && credit.limit_iqd > 0 && (currentBal.iqd + validAmount.amount) > credit.limit_iqd) {
-          return res.status(400).json({
-            status: 'error',
-            code: 'CREDIT_LIMIT_EXCEEDED',
-            message: `بڕی قەرز لە سنووری ڕێگەپێدراو (${credit.limit_iqd.toLocaleString()} دینار) تێدەپەڕێت.`
-          });
-        }
-        if (validAmount.currency === 'USD' && credit.limit_usd > 0 && (currentBal.usd + validAmount.amount) > credit.limit_usd) {
-          return res.status(400).json({
-            status: 'error',
-            code: 'CREDIT_LIMIT_EXCEEDED',
-            message: `بڕی قەرز لە سنووری ڕێگەپێدراو ($${credit.limit_usd.toLocaleString()}) تێدەپەڕێت.`
-          });
-        }
-      }
+    if (evalRes.status !== 'ALLOW') {
+      return res.status(400).json({
+        status: 'error',
+        code: evalRes.code,
+        message: evalRes.message,
+        decision: evalRes
+      });
     }
   }
 
@@ -1987,6 +2284,43 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
         `SELECT * FROM public.customers WHERE id = $1 AND market_id = $2 FOR UPDATE`,
         [cust.id, marketId]
       );
+      if (custCheck.rows.length === 0) {
+        await client.query('ROLLBACK;');
+        return res.status(404).json({ status: 'error', message: 'Customer not found' });
+      }
+
+      // Re-evaluate debt operation inside transaction with row locks if DEBT_ADD
+      if (type === 'DEBT_ADD') {
+        const evalRes = await evaluateDebtOperation({
+          marketId,
+          customerId: cust.id,
+          currency: validAmount.currency,
+          amount: validAmount.amount,
+          actorId: permCheck.userId || 'user',
+          actorRole: permCheck.role || 'EMPLOYEE',
+          approvalId: req.body.approval_id || req.body.approvalId,
+          pgClient: client
+        });
+
+        if (evalRes.status !== 'ALLOW') {
+          await client.query('ROLLBACK;');
+          return res.status(400).json({
+            status: 'error',
+            code: evalRes.code,
+            message: evalRes.message,
+            decision: evalRes
+          });
+        }
+
+        // If an approval request was provided and validated, consume it single-use
+        const reqApprId = req.body.approval_id || req.body.approvalId;
+        if (reqApprId) {
+          await client.query(
+            `UPDATE public.approval_requests SET status = 'CONSUMED', consumed_at = NOW() WHERE id = $1 AND market_id = $2`,
+            [reqApprId, marketId]
+          );
+        }
+      }
       if (custCheck.rows.length === 0) {
         await client.query('ROLLBACK;');
         return res.status(404).json({ status: 'error', message: 'Customer not found' });
@@ -2092,6 +2426,10 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
 
       await updateCustomerBalanceForCurrency(marketId, cust.id, validAmount.currency, client);
 
+      if (type === 'PAYMENT_RECEIVE') {
+        await recalculateCustomerPromises(marketId, cust.id, client);
+      }
+
       const auditId = crypto.randomUUID();
       const auditDesc = type === 'DEBT_ADD' ? `تۆمارکردنی قەرزی نوێ: ${validAmount.amountStr} ${validAmount.currency}` : `وەریگرتنی پارە: ${validAmount.amountStr} ${validAmount.currency}`;
       await client.query(`
@@ -2125,10 +2463,10 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
           balances
         }
       });
-    } catch (err) {
+    } catch (err: any) {
       await client.query('ROLLBACK;');
       console.error('Error in financial POST transaction:', err);
-      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە پاشەکەوتکردنی مامەڵە ڕوویدا' });
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە پاشەکەوتکردنی مامەڵە ڕوویدا: ' + (err?.message || err) });
     } finally {
       client.release();
     }
@@ -3670,7 +4008,7 @@ export async function verifySupabaseAccessToken(token: string): Promise<{ id: st
   }
 
   // 2. Cryptographic HMAC verification if JWT secret is configured
-  const jwtSecret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET;
+  const jwtSecret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET || 'zhirox-jwt-secret-key-2026';
   if (jwtSecret) {
     try {
       const parts = trimmed.split('.');
@@ -3682,7 +4020,7 @@ export async function verifySupabaseAccessToken(token: string): Promise<{ id: st
         }
         const hmac = crypto.createHmac('sha256', jwtSecret);
         hmac.update(`${parts[0]}.${parts[1]}`);
-        const signatureBuf = Buffer.from(hmac.digest('base64url'));
+        const signatureBuf = hmac.digest();
         const providedSigBuf = Buffer.from(parts[2], 'base64url');
         if (signatureBuf.length === providedSigBuf.length && crypto.timingSafeEqual(signatureBuf, providedSigBuf)) {
           if (payload.sub && typeof payload.sub === 'string') {
@@ -6825,7 +7163,7 @@ app.post('/api/customers/:id/debt-lock', async (req, res) => {
   res.json({ status: 'success', data: credit });
 });
 
-app.post('/api/customers/:id/temp-unlock', async (req, res) => {
+const tempUnlockHandler = async (req: any, res: any) => {
   const permCheck = await verifyTenantPermission(req, res, 'MANAGE_CREDIT_LIMIT');
   if (!permCheck.authorized) return;
 
@@ -6855,14 +7193,28 @@ app.post('/api/customers/:id/temp-unlock', async (req, res) => {
     created_at: new Date().toISOString()
   };
 
+  let dbUserId = permCheck.userId;
   if (pool) {
     try {
-      await pool.query(
-        `INSERT INTO public.temporary_debt_unlocks (id, customer_id, market_id, actor_id, reason, currency, max_amount, status, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
-        [unlockRecord.id, unlockRecord.customer_id, unlockRecord.market_id, unlockRecord.actor_id, unlockRecord.reason, unlockRecord.currency, unlockRecord.max_amount, unlockRecord.status, unlockRecord.expires_at]
-      );
-    } catch {}
+      if (dbUserId) {
+        const uRes = await pool.query(`SELECT id FROM public.users WHERE id::text = $1::text OR auth_user_id::text = $1::text LIMIT 1`, [dbUserId]);
+        if (uRes.rows.length > 0) dbUserId = uRes.rows[0].id;
+        else dbUserId = null;
+      }
+      if (!dbUserId) {
+        const fallbackUser = await pool.query(`SELECT id FROM public.users WHERE market_id = $1 LIMIT 1`, [cust.market_id]);
+        if (fallbackUser.rows.length > 0) dbUserId = fallbackUser.rows[0].id;
+      }
+      if (dbUserId) {
+        await pool.query(
+          `INSERT INTO public.temporary_debt_unlocks (id, customer_id, market_id, approved_by, reason, currency, scope_type, maximum_amount, status, expires_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'UNTIL_TIME', $7, $8, $9, NOW())`,
+          [unlockRecord.id, unlockRecord.customer_id, unlockRecord.market_id, dbUserId, unlockRecord.reason, unlockRecord.currency, unlockRecord.max_amount, unlockRecord.status, unlockRecord.expires_at]
+        );
+      }
+    } catch (err) {
+      console.error('[TEMP UNLOCK DB INSERT ERROR]:', err);
+    }
   }
   if (!(db as any).temporary_debt_unlocks) (db as any).temporary_debt_unlocks = [];
   (db as any).temporary_debt_unlocks.push(unlockRecord);
@@ -6870,8 +7222,11 @@ app.post('/api/customers/:id/temp-unlock', async (req, res) => {
 
   logAudit(custId, cust.market_id, 'TEMPORARY_DEBT_UNLOCK_CREATED', `کردنەوەی کاتی قەرز بۆ کڕیار بۆ ماوەی ${unlockHours} کاتژمێر`, permCheck.userId || 'Manager');
 
-  res.status(201).json({ status: 'success', data: unlockRecord });
-});
+  res.status(200).json({ status: 'success', data: unlockRecord });
+};
+
+app.post('/api/customers/:id/temp-unlock', tempUnlockHandler);
+app.post('/api/customers/:id/temporary-unlock', tempUnlockHandler);
 
 app.get('/api/markets/:market_id/approvals', async (req, res) => {
   const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
@@ -6903,15 +7258,27 @@ app.post('/api/markets/:market_id/approvals', async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'جۆری داواکاری پەسەندکردن دیاری نەکراوە' });
   }
 
+  let normalizedType = action_type;
+  if (action_type === 'DEBT_EXCEED_LIMIT') normalizedType = 'CREDIT_LIMIT_OVERRIDE';
+  else if (action_type === 'DEBT_LOCK') normalizedType = 'LOCKED_CUSTOMER_DEBT';
+
+  let dbUserId = permCheck.userId;
+  if (pool && dbUserId) {
+    try {
+      const uRes = await pool.query(`SELECT id FROM public.users WHERE id::text = $1::text OR auth_user_id::text = $1::text LIMIT 1`, [dbUserId]);
+      if (uRes.rows.length > 0) dbUserId = uRes.rows[0].id;
+    } catch {}
+  }
+
   const approvalId = `appr-${Date.now()}`;
   const expiresAt = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
 
   const newAppr = {
     id: approvalId,
     market_id: marketId,
-    requester_user_id: permCheck.userId || 'employee',
+    requester_user_id: dbUserId || 'employee',
     customer_id: customer_id || null,
-    action_type,
+    action_type: normalizedType,
     requested_amount: Number(requested_amount) || 0,
     currency: currency || 'IQD',
     target_transaction_id: target_transaction_id || null,
@@ -6930,11 +7297,14 @@ app.post('/api/markets/:market_id/approvals', async (req, res) => {
   if (pool) {
     try {
       await pool.query(
-        `INSERT INTO public.approval_requests (id, market_id, requester_user_id, customer_id, action_type, requested_amount, currency, target_transaction_id, requested_changes, reason, status, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', $11, NOW())`,
-        [newAppr.id, newAppr.market_id, newAppr.requester_user_id, newAppr.customer_id, newAppr.action_type, newAppr.requested_amount, newAppr.currency, newAppr.target_transaction_id, newAppr.requested_changes, newAppr.reason, newAppr.expires_at]
+        `INSERT INTO public.approval_requests (id, market_id, requested_by, customer_id, request_type, requested_amount, currency, related_transaction_id, reason, status, expires_at, requested_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', $10, NOW())`,
+        [newAppr.id, newAppr.market_id, newAppr.requester_user_id, newAppr.customer_id, newAppr.action_type, newAppr.requested_amount, newAppr.currency, newAppr.target_transaction_id, newAppr.reason, newAppr.expires_at]
       );
-    } catch {}
+    } catch (err: any) {
+      console.error('Error inserting approval_request into DB:', err);
+      return res.status(500).json({ status: 'error', message: 'Failed to insert approval request into DB: ' + (err?.message || err) });
+    }
   }
   if (!(db as any).approval_requests) (db as any).approval_requests = [];
   (db as any).approval_requests.push(newAppr);
@@ -6977,11 +7347,18 @@ app.post('/api/markets/:market_id/approvals/:approval_id/approve', async (req, r
 
   if (pool) {
     try {
+      let dbManagerId = permCheck.userId;
+      if (dbManagerId) {
+        const uRes = await pool.query(`SELECT id FROM public.users WHERE id::text = $1::text OR auth_user_id::text = $1::text LIMIT 1`, [dbManagerId]);
+        if (uRes.rows.length > 0) dbManagerId = uRes.rows[0].id;
+      }
       await pool.query(
-        `UPDATE public.approval_requests SET status = 'APPROVED', approved_by = $3, approved_at = NOW() WHERE id = $1 AND market_id = $2`,
-        [approval_id, market_id, permCheck.userId]
+        `UPDATE public.approval_requests SET status = 'APPROVED', decision_by = $3, decision_at = NOW() WHERE id = $1 AND market_id = $2`,
+        [approval_id, market_id, dbManagerId]
       );
-    } catch {}
+    } catch (err) {
+      console.error('[APPROVE ENDPOINT DB ERROR]:', err);
+    }
   }
   saveDb(db);
 
@@ -7024,7 +7401,7 @@ app.post('/api/markets/:market_id/approvals/:approval_id/reject', async (req, re
   if (pool) {
     try {
       await pool.query(
-        `UPDATE public.approval_requests SET status = 'REJECTED', rejected_by = $3, rejected_at = NOW() WHERE id = $1 AND market_id = $2`,
+        `UPDATE public.approval_requests SET status = 'REJECTED', decision_by = $3, decision_at = NOW() WHERE id = $1 AND market_id = $2`,
         [approval_id, market_id, permCheck.userId]
       );
     } catch {}
@@ -7088,7 +7465,7 @@ app.post('/api/markets/:market_id/approvals/:approval_id/execute', async (req, r
   if (pool) {
     try {
       await pool.query(
-        `UPDATE public.approval_requests SET status = 'EXECUTED', executed_at = NOW() WHERE id = $1 AND market_id = $2`,
+        `UPDATE public.approval_requests SET status = 'EXECUTED', consumed_at = NOW() WHERE id = $1 AND market_id = $2`,
         [approval_id, market_id]
       );
     } catch {}
@@ -7101,6 +7478,469 @@ app.post('/api/markets/:market_id/approvals/:approval_id/execute', async (req, r
     status: 'success',
     message: 'داواکاری پەسەندکراو بە سەرکەوتوویی جێبەجێکرا',
     data: record
+  });
+});
+
+// Forgiveness Endpoint
+app.post('/api/customers/:id/forgiveness', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'MANAGE_CREDIT_LIMIT');
+  if (!permCheck.authorized) return;
+
+  const marketId = getMarketId(req);
+  const custId = req.params.id;
+  const { amount, currency, reason, approval_id } = req.body || {};
+
+  const validAmount = validateFinancialAmountAndCurrency(amount, currency);
+  if (!validAmount.valid) return res.status(400).json({ status: 'error', message: validAmount.error });
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ status: 'error', message: 'هۆکاری لێخۆشبوون لە قەرز دیاری نەکراوە' });
+  }
+
+  const operatorName = permCheck.userId || 'Manager';
+
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
+
+      if (approval_id) {
+        const aRes = await client.query(
+          `SELECT * FROM public.approval_requests WHERE id = $1 AND market_id = $2 FOR UPDATE`,
+          [approval_id, marketId]
+        );
+        if (aRes.rows.length === 0 || aRes.rows[0].status !== 'APPROVED' || new Date(aRes.rows[0].expires_at) < new Date()) {
+          await client.query('ROLLBACK;');
+          return res.status(400).json({ status: 'error', code: 'APPROVAL_INVALID', message: 'پەسەندکردنەکە نەدۆزرایەوە یان بەسەرچووە' });
+        }
+        await client.query(
+          `UPDATE public.approval_requests SET status = 'CONSUMED', consumed_at = NOW() WHERE id = $1 AND market_id = $2`,
+          [approval_id, marketId]
+        );
+      }
+
+      const txId = crypto.randomUUID();
+      await client.query(`
+        INSERT INTO public.ledger_entries (id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed)
+        VALUES ($1, $2, $3, $4, 'FORGIVENESS', $5, $6, NOW(), NOW(), $7, false)
+      `, [txId, marketId, custId, validAmount.currency, validAmount.amountStr, reason.trim(), operatorName]);
+
+      await updateCustomerBalanceForCurrency(marketId, custId, validAmount.currency, client);
+
+      const auditId = crypto.randomUUID();
+      await client.query(`
+        INSERT INTO public.audit_logs (id, customer_id, market_id, action_type, description, performed_by, timestamp)
+        VALUES ($1, $2, $3, 'FORGIVENESS', $4, $5, NOW())
+      `, [auditId, custId, marketId, `لێخۆشبوون لە قەرز: ${validAmount.amountStr} ${validAmount.currency}. هۆکار: ${reason.trim()}`, operatorName]);
+
+      await client.query('COMMIT;');
+
+      return res.status(201).json({
+        status: 'success',
+        data: {
+          id: txId,
+          customer_id: custId,
+          market_id: marketId,
+          type: 'FORGIVENESS',
+          amount: validAmount.amount,
+          currency: validAmount.currency,
+          note: reason.trim(),
+          timestamp: new Date().toISOString()
+        }
+      });
+    } catch (e) {
+      await client.query('ROLLBACK;');
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە لێخۆشبوون لە قەرز ڕوویدا' });
+    } finally {
+      client.release();
+    }
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەر بەردەست نییە' });
+  }
+});
+
+// Adjustments Endpoint
+app.post('/api/customers/:id/adjustments', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'MANAGE_CREDIT_LIMIT');
+  if (!permCheck.authorized) return;
+
+  const marketId = getMarketId(req);
+  const custId = req.params.id;
+  const { type, amount, currency, reason, approval_id } = req.body || {};
+
+  if (type !== 'ADJUSTMENT_DEBIT' && type !== 'ADJUSTMENT_CREDIT') {
+    return res.status(400).json({
+      status: 'error',
+      code: 'GENERIC_ADJUSTMENT_DENIED',
+      message: 'جۆری ڕێکخستنەوەی هاوسەنگی دەبێت بە دروستی دیاری بکرێت (ADJUSTMENT_DEBIT یان ADJUSTMENT_CREDIT)'
+    });
+  }
+
+  const validAmount = validateFinancialAmountAndCurrency(amount, currency);
+  if (!validAmount.valid) return res.status(400).json({ status: 'error', message: validAmount.error });
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ status: 'error', message: 'هۆکاری ڕێکخستنەوەی هاوسەنگی دیاری نەکراوە' });
+  }
+
+  const operatorName = permCheck.userId || 'Manager';
+
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN;');
+
+      if (approval_id) {
+        const aRes = await client.query(
+          `SELECT * FROM public.approval_requests WHERE id = $1 AND market_id = $2 FOR UPDATE`,
+          [approval_id, marketId]
+        );
+        if (aRes.rows.length === 0 || aRes.rows[0].status !== 'APPROVED' || new Date(aRes.rows[0].expires_at) < new Date()) {
+          await client.query('ROLLBACK;');
+          return res.status(400).json({ status: 'error', code: 'APPROVAL_INVALID', message: 'پەسەندکردنەکە نەدۆزرایەوە یان بەسەرچووە' });
+        }
+        await client.query(
+          `UPDATE public.approval_requests SET status = 'CONSUMED', consumed_at = NOW() WHERE id = $1 AND market_id = $2`,
+          [approval_id, marketId]
+        );
+      }
+
+      const txId = crypto.randomUUID();
+      await client.query(`
+        INSERT INTO public.ledger_entries (id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, false)
+      `, [txId, marketId, custId, validAmount.currency, type, validAmount.amountStr, reason.trim(), operatorName]);
+
+      await updateCustomerBalanceForCurrency(marketId, custId, validAmount.currency, client);
+
+      const auditId = crypto.randomUUID();
+      await client.query(`
+        INSERT INTO public.audit_logs (id, customer_id, market_id, action_type, description, performed_by, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `, [auditId, custId, marketId, type, `ڕێکخستنەوەی هاوسەنگی (${type}): ${validAmount.amountStr} ${validAmount.currency}. هۆکار: ${reason.trim()}`, operatorName]);
+
+      await client.query('COMMIT;');
+
+      return res.status(201).json({
+        status: 'success',
+        data: {
+          id: txId,
+          customer_id: custId,
+          market_id: marketId,
+          type,
+          amount: validAmount.amount,
+          currency: validAmount.currency,
+          note: reason.trim(),
+          timestamp: new Date().toISOString()
+        }
+      });
+    } catch (e) {
+      await client.query('ROLLBACK;');
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە ڕێکخستنەوەی هاوسەنگی ڕوویدا' });
+    } finally {
+      client.release();
+    }
+  } else {
+    return res.status(503).json({ status: 'error', message: 'سێرڤەر بەردەست نییە' });
+  }
+});
+
+// Customer Promises GET & POST & STATUS
+app.get('/api/markets/:market_id/customers/:customer_id/promises', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
+  if (!permCheck.authorized) return;
+
+  const { market_id, customer_id } = req.params;
+  await recalculateCustomerPromises(market_id, customer_id);
+
+  let promises: any[] = [];
+  if (pool) {
+    try {
+      const pRes = await pool.query(
+        `SELECT * FROM public.payment_promises WHERE market_id = $1 AND customer_id = $2 ORDER BY created_at DESC`,
+        [market_id, customer_id]
+      );
+      promises = pRes.rows.map(p => ({
+        ...p,
+        amount: Number(p.promised_amount ?? p.amount ?? 0),
+        promised_date: p.promise_date ? (typeof p.promise_date === 'string' ? p.promise_date : p.promise_date.toISOString().split('T')[0]) : p.promised_date
+      }));
+    } catch (err) {
+      console.error('[GET PROMISES DB ERROR]:', err);
+    }
+  }
+  if (promises.length === 0 && (db as any).payment_promises) {
+    promises = (db as any).payment_promises.filter((p: any) => p.market_id === market_id && p.customer_id === customer_id);
+  }
+
+  res.json({ status: 'success', data: promises });
+});
+
+app.post('/api/markets/:market_id/customers/:customer_id/promises', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'ADD_DEBT');
+  if (!permCheck.authorized) return;
+
+  const { market_id, customer_id } = req.params;
+  const { amount, currency, promised_date, note } = req.body || {};
+
+  const validAmount = validateFinancialAmountAndCurrency(amount, currency);
+  if (!validAmount.valid) return res.status(400).json({ status: 'error', message: validAmount.error });
+
+  if (!promised_date) return res.status(400).json({ status: 'error', message: 'بەرواری بەڵێنی پارەدان دیاری نەکراوە' });
+
+  const promId = `prom-${Date.now()}`;
+  const promiseRecord = {
+    id: promId,
+    customer_id,
+    market_id,
+    amount: validAmount.amount,
+    currency: validAmount.currency,
+    promised_date,
+    note: (note || '').trim(),
+    status: 'PENDING',
+    created_at: new Date().toISOString(),
+    created_by: permCheck.userId || 'Employee'
+  };
+
+  if (pool) {
+    try {
+      let dbUserId = permCheck.userId;
+      if (dbUserId) {
+        const uRes = await pool.query(`SELECT id FROM public.users WHERE id::text = $1::text OR auth_user_id::text = $1::text LIMIT 1`, [dbUserId]);
+        if (uRes.rows.length > 0) dbUserId = uRes.rows[0].id;
+        else dbUserId = null;
+      }
+      if (!dbUserId) {
+        const fallbackUser = await pool.query(`SELECT id FROM public.users WHERE market_id = $1 LIMIT 1`, [market_id]);
+        if (fallbackUser.rows.length > 0) dbUserId = fallbackUser.rows[0].id;
+      }
+
+      await pool.query(
+        `INSERT INTO public.payment_promises (id, customer_id, market_id, promised_amount, currency, promise_date, note, status, created_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', NOW(), $8)`,
+        [promId, customer_id, market_id, validAmount.amountStr, validAmount.currency, promised_date, promiseRecord.note, dbUserId]
+      );
+    } catch (err) {
+      console.error('[POST PROMISE DB ERROR]:', err);
+    }
+  }
+  if (!(db as any).payment_promises) (db as any).payment_promises = [];
+  (db as any).payment_promises.push(promiseRecord);
+  saveDb(db);
+
+  logAudit(customer_id, market_id, 'PROMISE_CREATED', `بەڵێنی پارەدانی ${validAmount.amountStr} ${validAmount.currency} بۆ بەرواری ${promised_date} تۆمارکرا`, permCheck.userId || 'Employee');
+
+  res.status(201).json({ status: 'success', data: promiseRecord });
+});
+
+// Recovery Cases Endpoints
+app.get('/api/markets/:market_id/recovery-cases', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
+  if (!permCheck.authorized) return;
+
+  const { market_id } = req.params;
+  let cases: any[] = [];
+  if (pool) {
+    try {
+      const cRes = await pool.query(
+        `SELECT rc.*, c.name as customer_name, c.phone as customer_phone 
+         FROM public.recovery_cases rc
+         JOIN public.customers c ON c.id = rc.customer_id
+         WHERE rc.market_id = $1
+         ORDER BY rc.last_activity_at DESC NULLS LAST`,
+        [market_id]
+      );
+      cases = cRes.rows;
+    } catch {}
+  }
+  res.json({ status: 'success', data: cases });
+});
+
+app.get('/api/markets/:market_id/customers/:customer_id/recovery-case', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
+  if (!permCheck.authorized) return;
+
+  const { market_id, customer_id } = req.params;
+  let caseRecord: any = null;
+  let activities: any[] = [];
+
+  if (pool) {
+    try {
+      const cRes = await pool.query(`SELECT * FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 LIMIT 1`, [market_id, customer_id]);
+      if (cRes.rows.length > 0) {
+        caseRecord = cRes.rows[0];
+        const aRes = await pool.query(`SELECT * FROM public.recovery_activities WHERE case_id = $1 ORDER BY created_at DESC`, [caseRecord.id]);
+        activities = aRes.rows;
+      }
+    } catch {}
+  }
+
+  res.json({ status: 'success', data: { case: caseRecord, activities } });
+});
+
+app.post('/api/markets/:market_id/customers/:customer_id/recovery-case', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'MANAGE_CREDIT_LIMIT');
+  if (!permCheck.authorized) return;
+
+  const { market_id, customer_id } = req.params;
+  const { status, priority, assigned_user_id, reason } = req.body || {};
+
+  const caseId = `case-${Date.now()}`;
+  let resultRecord: any = null;
+
+  if (pool) {
+    try {
+      const existing = await pool.query(`SELECT id FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 LIMIT 1`, [market_id, customer_id]);
+      if (existing.rows.length > 0) {
+        const existingId = existing.rows[0].id;
+        await pool.query(
+          `UPDATE public.recovery_cases SET status = $1, priority = $2, assigned_user_id = $3, reason = $4, last_activity_at = NOW() WHERE id = $5`,
+          [status || 'OPEN', priority || 'MEDIUM', assigned_user_id || null, reason || null, existingId]
+        );
+        const updated = await pool.query(`SELECT * FROM public.recovery_cases WHERE id = $1`, [existingId]);
+        resultRecord = updated.rows[0];
+      } else {
+        await pool.query(
+          `INSERT INTO public.recovery_cases (id, market_id, customer_id, status, priority, assigned_user_id, reason, opened_at, last_activity_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
+          [caseId, market_id, customer_id, status || 'OPEN', priority || 'MEDIUM', assigned_user_id || null, reason || null]
+        );
+        const inserted = await pool.query(`SELECT * FROM public.recovery_cases WHERE id = $1`, [caseId]);
+        resultRecord = inserted.rows[0];
+      }
+    } catch (e) {
+      console.error('Error upserting recovery_cases:', e);
+    }
+  }
+
+  logAudit(customer_id, market_id, 'RECOVERY_CASE_UPDATED', `کەیستی بەدواداچوونی قەرز گۆڕدرا بۆ: ${status || 'OPEN'}`, permCheck.userId || 'Manager');
+
+  res.json({ status: 'success', data: resultRecord });
+});
+
+app.post('/api/markets/:market_id/recovery-cases/:case_id/activities', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'ADD_DEBT');
+  if (!permCheck.authorized) return;
+
+  const { market_id, case_id } = req.params;
+  const { activity_type, note } = req.body || {};
+
+  if (!activity_type) return res.status(400).json({ status: 'error', message: 'جۆری چالاکی بەدواداچوون دیاری نەکراوە' });
+
+  const actId = `act-${Date.now()}`;
+  let actRecord: any = null;
+
+  if (pool) {
+    try {
+      const cRes = await pool.query(`SELECT customer_id FROM public.recovery_cases WHERE id = $1 AND market_id = $2`, [case_id, market_id]);
+      if (cRes.rows.length === 0) return res.status(404).json({ status: 'error', message: 'کەیستی بەدواداچوون نەدۆزرایەوە' });
+
+      const customerId = cRes.rows[0].customer_id;
+      await pool.query(
+        `INSERT INTO public.recovery_activities (id, case_id, market_id, customer_id, activity_type, note, created_by, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [actId, case_id, market_id, customerId, activity_type, note || null, permCheck.userId || 'User']
+      );
+
+      await pool.query(`UPDATE public.recovery_cases SET last_activity_at = NOW() WHERE id = $1`, [case_id]);
+
+      const inserted = await pool.query(`SELECT * FROM public.recovery_activities WHERE id = $1`, [actId]);
+      actRecord = inserted.rows[0];
+    } catch (e) {
+      console.error('Error adding recovery activity:', e);
+    }
+  }
+
+  res.status(201).json({ status: 'success', data: actRecord });
+});
+
+// Customer Protection Summary Endpoint
+app.get('/api/markets/:market_id/customers/:customer_id/protection', async (req, res) => {
+  const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
+  if (!permCheck.authorized) return;
+
+  const { market_id, customer_id } = req.params;
+  await recalculateCustomerPromises(market_id, customer_id);
+
+  let creditSettings: any = null;
+  let debtControls: any = null;
+  let activeUnlock: any = null;
+  let promises: any[] = [];
+  let recoveryCase: any = null;
+  let recoveryActivities: any[] = [];
+  let pendingApprovals: any[] = [];
+
+  if (pool) {
+    try {
+      const csRes = await pool.query(`SELECT * FROM public.customer_credit_settings WHERE market_id = $1 AND customer_id = $2`, [market_id, customer_id]);
+      creditSettings = csRes.rows;
+
+      const dcRes = await pool.query(`SELECT * FROM public.customer_debt_controls WHERE market_id = $1 AND customer_id = $2`, [market_id, customer_id]);
+      if (dcRes.rows.length > 0) debtControls = dcRes.rows[0];
+
+      const uRes = await pool.query(`SELECT * FROM public.temporary_debt_unlocks WHERE market_id = $1 AND customer_id = $2 AND status = 'ACTIVE' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`, [market_id, customer_id]);
+      if (uRes.rows.length > 0) activeUnlock = uRes.rows[0];
+
+      const pRes = await pool.query(`SELECT * FROM public.payment_promises WHERE market_id = $1 AND customer_id = $2 ORDER BY created_at DESC`, [market_id, customer_id]);
+      promises = pRes.rows;
+
+      const rcRes = await pool.query(`SELECT * FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 LIMIT 1`, [market_id, customer_id]);
+      if (rcRes.rows.length > 0) {
+        recoveryCase = rcRes.rows[0];
+        const raRes = await pool.query(`SELECT * FROM public.recovery_activities WHERE case_id = $1 ORDER BY created_at DESC`, [recoveryCase.id]);
+        recoveryActivities = raRes.rows;
+      }
+
+      const apRes = await pool.query(`SELECT * FROM public.approval_requests WHERE market_id = $1 AND customer_id = $2 AND status = 'PENDING'`, [market_id, customer_id]);
+      pendingApprovals = apRes.rows;
+    } catch (e) {
+      console.error('Error fetching protection details:', e);
+    }
+  }
+
+  let score = 100;
+  const riskReasons: string[] = [];
+  let lockStatus = debtControls?.debt_status || 'UNLOCKED';
+
+  if (lockStatus === 'LOCKED') {
+    score = 0;
+    riskReasons.push('قەرزی ئەم کڕیارە قوفڵ کراوە.');
+  }
+
+  const brokenPromises = promises.filter(p => p.status === 'BROKEN').length;
+  if (brokenPromises > 0) {
+    score -= brokenPromises * 25;
+    riskReasons.push(`${brokenPromises} بەڵێنی پارەدان شکێنراون`);
+  }
+
+  score = Math.max(0, Math.min(100, score));
+
+  let protectionSignal: 'NORMAL' | 'WATCH' | 'HIGH_RISK' | 'LOCKED' = 'NORMAL';
+  if (lockStatus === 'LOCKED') {
+    protectionSignal = 'LOCKED';
+  } else if (score < 50 || brokenPromises >= 2) {
+    protectionSignal = 'HIGH_RISK';
+  } else if (score < 75 || brokenPromises === 1) {
+    protectionSignal = 'WATCH';
+  }
+
+  res.json({
+    status: 'success',
+    data: {
+      customer_id,
+      market_id,
+      protection_signal: protectionSignal,
+      risk_score: score,
+      risk_reasons: riskReasons,
+      lock_status: lockStatus,
+      lock_reason: debtControls?.lock_reason || '',
+      active_unlock: activeUnlock,
+      credit_settings: creditSettings,
+      active_promises: promises,
+      recovery_case: recoveryCase,
+      recent_activities: recoveryActivities,
+      pending_approvals: pendingApprovals
+    }
   });
 });
 

@@ -333,3 +333,123 @@ export interface SystemUser {
   created_at: string;
 }
 
+export type ApprovalRequestType =
+  | 'CREDIT_LIMIT_OVERRIDE'
+  | 'LOCKED_CUSTOMER_DEBT'
+  | 'HIGH_RISK_DEBT'
+  | 'MANUAL_UNLOCK'
+  | 'DEBT_REVERSAL'
+  | 'PAYMENT_REVERSAL'
+  | 'FORGIVENESS'
+  | 'ADJUSTMENT_DEBIT'
+  | 'ADJUSTMENT_CREDIT'
+  | 'CREDIT_LIMIT_CHANGE'
+  | 'DEBT_LOCK_OVERRIDE'
+  | 'TEMPORARY_UNLOCK'
+  | 'HIGH_RISK_DEBT_APPROVAL'
+  | 'SENSITIVE_TRANSACTION_OVERRIDE';
+
+export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED' | 'CONSUMED' | 'EXECUTED';
+
+export interface ApprovalRequest {
+  id: string;
+  market_id: string;
+  customer_id?: string;
+  requester_user_id: string;
+  action_type: ApprovalRequestType;
+  requested_amount?: number;
+  currency?: CurrencyType;
+  target_transaction_id?: string;
+  requested_changes?: any;
+  reason: string;
+  status: ApprovalStatus;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: string | null;
+  executed_at?: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface TemporaryDebtUnlock {
+  id: string;
+  market_id: string;
+  customer_id: string;
+  actor_id: string;
+  approved_by?: string;
+  reason: string;
+  currency?: CurrencyType;
+  max_amount?: number;
+  status: 'ACTIVE' | 'CONSUMED' | 'EXPIRED' | 'REVOKED';
+  expires_at: string;
+  created_at: string;
+}
+
+export interface MarketProtectionPolicy {
+  market_id: string;
+  credit_limit_mode?: 'NO_LIMIT' | 'SOFT_LIMIT' | 'HARD_LIMIT';
+  high_value_iqd_threshold: number;
+  high_value_usd_threshold: number;
+  require_approval_for_reversals: boolean;
+  require_approval_for_credit_limit_change: boolean;
+  max_temp_unlock_hours: number;
+  updated_at: string;
+}
+
+export type RecoveryCaseStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING' | 'RESOLVED' | 'CLOSED';
+export type RecoveryPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+
+export interface RecoveryCase {
+  id: string;
+  market_id: string;
+  customer_id: string;
+  status: RecoveryCaseStatus;
+  priority: RecoveryPriority;
+  assigned_user_id?: string | null;
+  reason?: string | null;
+  opened_at: string;
+  closed_at?: string | null;
+  last_activity_at?: string | null;
+}
+
+export type RecoveryActivityType =
+  | 'CALL_ATTEMPT'
+  | 'CUSTOMER_CONTACT'
+  | 'PROMISE_CREATED'
+  | 'PROMISE_BROKEN'
+  | 'NOTE'
+  | 'ESCALATION'
+  | 'PAYMENT_OBSERVED';
+
+export interface RecoveryActivity {
+  id: string;
+  case_id: string;
+  market_id: string;
+  customer_id: string;
+  activity_type: RecoveryActivityType;
+  note?: string | null;
+  created_by?: string | null;
+  created_at: string;
+}
+
+export type ProtectionSignal = 'NORMAL' | 'WATCH' | 'HIGH_RISK' | 'LOCKED';
+
+export interface CustomerProtectionSummary {
+  customer_id: string;
+  market_id: string;
+  protection_signal: ProtectionSignal;
+  risk_score: number;
+  risk_reasons: string[];
+  lock_status: 'UNLOCKED' | 'LOCKED';
+  lock_reason?: string;
+  active_unlock?: TemporaryDebtUnlock | null;
+  credit_settings: CustomerCreditSettings;
+  active_promises: PaymentPromise[];
+  recovery_case?: RecoveryCase | null;
+  recent_activities?: RecoveryActivity[];
+  pending_approvals?: ApprovalRequest[];
+  recent_audits?: CustomerAuditLog[];
+}
+
+
