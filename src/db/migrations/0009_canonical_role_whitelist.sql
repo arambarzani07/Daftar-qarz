@@ -40,6 +40,16 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'MIGRATION 0009 ABORTED: Found orphan market_id in public.market_memberships!';
   END IF;
+
+  -- D. Detect duplicate market_id + user_id relationships or multiple ACTIVE memberships
+  IF EXISTS (
+    SELECT market_id, user_id, COUNT(*)
+    FROM public.market_memberships
+    GROUP BY market_id, user_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'MIGRATION 0009 ABORTED: Found duplicate market_id + user_id memberships!';
+  END IF;
 END $$;
 
 -- 2. Normalize legacy roles (OWNER, MARKET_OWNER, MANAGER) to MARKET_MANAGER
@@ -51,3 +61,22 @@ WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER');
 ALTER TABLE public.market_memberships DROP CONSTRAINT IF EXISTS market_memberships_role_check;
 ALTER TABLE public.market_memberships ADD CONSTRAINT market_memberships_role_check CHECK (role IN ('MARKET_MANAGER', 'EMPLOYEE'));
 
+-- 4. POST-MIGRATION VERIFICATION
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.market_memberships WHERE role NOT IN ('MARKET_MANAGER', 'EMPLOYEE')
+  ) THEN
+    RAISE EXCEPTION 'MIGRATION 0009 VERIFICATION FAILED: Un-whitelisted role remains post-migration!';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 
+    FROM public.market_memberships mm
+    JOIN public.users u ON mm.user_id = u.id
+    JOIN public.platform_access pa ON pa.user_id = u.id
+    WHERE pa.role = 'PLATFORM_OWNER' AND pa.status = 'ACTIVE'
+  ) THEN
+    RAISE EXCEPTION 'MIGRATION 0009 VERIFICATION FAILED: PLATFORM_OWNER membership exists post-migration!';
+  END IF;
+END $$;
