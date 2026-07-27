@@ -117,7 +117,7 @@ export default function App() {
 
         if (res.ok && json.status === 'success' && json.data) {
           const contexts = Array.isArray(json.data.contexts) ? json.data.contexts : [];
-          const defaultContext = json.data.defaultContext || contexts[0] || { role: 'MANAGER', tenant_id: 'default' };
+          const defaultContext = json.data.defaultContext || contexts[0] || { role: 'MARKET_MANAGER', tenant_id: 'default' };
 
           if (contexts.length > 1 && (currentPath === '/auth/select-context' || !localStorage.getItem('zhirox_active_context'))) {
             setAuthStatus('SELECT_CONTEXT');
@@ -694,17 +694,13 @@ export default function App() {
           <TransactionTimeline
             transactions={transactions}
             onReverseTx={
-              authState.activeContext?.role === 'PLATFORM_OWNER' ||
-              authState.activeContext?.role === 'MARKET_OWNER' ||
-              authState.activeContext?.role === 'MANAGER' ||
+              authState.activeContext?.role === 'MARKET_MANAGER' ||
               (authState.activeContext?.permissions && authState.activeContext.permissions.includes('REVERSE_TRANSACTION'))
                 ? handleReverseTx
                 : undefined
             }
             onEditTx={
-              authState.activeContext?.role === 'PLATFORM_OWNER' ||
-              authState.activeContext?.role === 'MARKET_OWNER' ||
-              authState.activeContext?.role === 'MANAGER' ||
+              authState.activeContext?.role === 'MARKET_MANAGER' ||
               (authState.activeContext?.permissions && authState.activeContext.permissions.includes('EDIT_TRANSACTION'))
                 ? (tx) => {
                     setEditingTransaction(tx);

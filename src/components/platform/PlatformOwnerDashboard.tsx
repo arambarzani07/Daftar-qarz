@@ -87,7 +87,7 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
     full_name: '',
     email: '',
     phone: '',
-    role: 'MANAGER' as 'MARKET_OWNER' | 'MANAGER'
+    role: 'MARKET_MANAGER' as 'MARKET_MANAGER' | 'EMPLOYEE'
   });
 
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -350,7 +350,7 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
       if (json.status === 'success') {
         setActionMessage({ type: 'success', text: 'بەڕێوەبەری نوێ دیاریکرا بە سەرکەوتوویی!' });
         setSelectedMarketForManager(null);
-        setNewManager({ full_name: '', email: '', phone: '', role: 'MANAGER' });
+        setNewManager({ full_name: '', email: '', phone: '', role: 'MARKET_MANAGER' });
         await loadPlatformData();
       } else {
         setActionMessage({ type: 'error', text: json.message || 'زیادکردنی بەڕێوەبەر سەرکەوتوو نەبوو' });
@@ -714,11 +714,11 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
                         </td>
                         <td className="p-4">
                           <span className={`text-[11px] px-2.5 py-1 rounded-full font-bold border ${
-                            mgr.role === 'MARKET_OWNER' || mgr.role === 'OWNER'
+                            mgr.role === 'MARKET_MANAGER'
                               ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
                               : 'bg-blue-500/10 text-blue-400 border-blue-500/20'
                           }`}>
-                            {mgr.role === 'MARKET_OWNER' || mgr.role === 'OWNER' ? 'خاوەنی مارکێت' : 'بەڕێوەبەر'}
+                            {mgr.role === 'MARKET_MANAGER' ? 'بەڕێوەبەری مارکێت' : 'کارمەند'}
                           </span>
                         </td>
                         <td className="p-4">
@@ -1033,11 +1033,11 @@ export const PlatformOwnerDashboard: React.FC<PlatformOwnerDashboardProps> = ({
                 <label className="block text-xs font-bold text-[#8E8E93] mb-1.5">ڕۆڵ و ئاستی دەسەڵات</label>
                 <select
                   value={newManager.role}
-                  onChange={(e) => setNewManager({ ...newManager, role: e.target.value as 'MARKET_OWNER' | 'MANAGER' })}
+                  onChange={(e) => setNewManager({ ...newManager, role: e.target.value as 'MARKET_MANAGER' | 'EMPLOYEE' })}
                   className="w-full bg-[#242428] border border-[#3A3A3C] text-sm rounded-xl px-4 py-2.5 text-[#F5F5F7] outline-none transition-all"
                 >
-                  <option value="MARKET_OWNER">خاوەنی مارکێت (Market Owner)</option>
-                  <option value="MANAGER">بەڕێوەبەر (Manager)</option>
+                  <option value="MARKET_MANAGER">بەڕێوەبەری مارکێت (Market Manager)</option>
+                  <option value="EMPLOYEE">کارمەند (Employee)</option>
                 </select>
               </div>
 

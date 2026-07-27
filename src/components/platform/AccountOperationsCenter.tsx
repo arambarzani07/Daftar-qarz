@@ -515,7 +515,7 @@ export const AccountOperationsCenter: React.FC = () => {
                       بەڕێوەبەری ئێستا:
                     </span>
                     <span className="bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded text-[11px] font-medium">
-                      {rec.manager_role === 'OWNER' || rec.manager_role === 'MARKET_OWNER' ? 'خاوەن شوێن' : 'بەڕێوەبەر'}
+                      {rec.manager_role === 'MARKET_MANAGER' ? 'بەڕێوەبەری مارکێت' : 'کارمەند'}
                     </span>
                   </div>
 

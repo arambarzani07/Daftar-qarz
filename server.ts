@@ -89,24 +89,6 @@ export async function initPostgresSchema() {
         }
       }
       console.log('Database schema verified successfully! All migrations are applied and up-to-date.');
-      
-      // Ensure restrictive FK constraints on audit_logs are removed
-      await client.query(`
-        ALTER TABLE public.audit_logs DROP CONSTRAINT IF EXISTS fk_audit_customer;
-        ALTER TABLE public.audit_logs DROP CONSTRAINT IF EXISTS fk_audit_approval;
-        ALTER TABLE public.audit_logs DROP CONSTRAINT IF EXISTS fk_audit_ledger;
-      `).catch(() => {});
-
-      // Gate 5: Forward-only migration to normalize legacy manager roles in public.market_memberships to MARKET_MANAGER
-      await client.query(`
-        ALTER TABLE public.market_memberships DROP CONSTRAINT IF EXISTS market_memberships_role_check;
-        ALTER TABLE public.market_memberships ADD CONSTRAINT market_memberships_role_check CHECK (role IN ('OWNER', 'MANAGER', 'MARKET_MANAGER', 'EMPLOYEE', 'PLATFORM_OWNER', 'MARKET_OWNER'));
-        UPDATE public.market_memberships
-        SET role = 'MARKET_MANAGER'
-        WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER');
-      `).catch((err) => {
-        console.error('Failed normalizing market_memberships roles:', err);
-      });
     } finally {
       client.release();
     }
@@ -241,7 +223,7 @@ export interface SystemUser {
   name: string;
   phone: string;
   password?: string;
-  role: 'PLATFORM_OWNER' | 'MARKET_OWNER' | 'MANAGER' | 'EMPLOYEE';
+  role: 'PLATFORM_OWNER' | 'MARKET_MANAGER' | 'EMPLOYEE';
   status: 'ACTIVE' | 'INACTIVE' | 'PENDING_ACTIVATION' | 'SUSPENDED' | 'REVOKED';
   permissions: string[];
   created_at: string;
@@ -473,7 +455,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         id: u.id,
         name: u.full_name || '',
         phone: u.phone || '',
-        role: u.id === 'usr-platform-owner' ? 'PLATFORM_OWNER' : 'MANAGER',
+        role: u.id === 'usr-platform-owner' ? 'PLATFORM_OWNER' : 'MARKET_MANAGER',
         status: u.is_active !== false ? 'ACTIVE' : 'INACTIVE',
         permissions: [],
         created_at: u.created_at?.toISOString ? u.created_at.toISOString() : new Date().toISOString()
@@ -508,7 +490,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         const custCount = resCustomers.rows.filter(c => c.market_id === m.id).length;
         
         // Lookup actual owner user from membership and user tables
-        const ownerMem = resMemberships.rows.find(mm => mm.market_id === m.id && (mm.role === 'OWNER' || mm.role === 'MARKET_OWNER'));
+        const ownerMem = resMemberships.rows.find(mm => mm.market_id === m.id && mm.role === 'MARKET_MANAGER');
         const ownerUsr = ownerMem ? resUsers.rows.find(u => u.id === ownerMem.user_id) : null;
 
         return {
@@ -672,7 +654,7 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
       const globalSettings = (requestedMarketId && resSettings.rows.find(s => s.market_id === requestedMarketId)) || resSettings.rows[0];
       
       const activeMktId = requestedMarketId || '';
-      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && (mm.role === 'OWNER' || mm.role === 'MARKET_OWNER' || mm.role === 'MARKET_MANAGER'));
+      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && mm.role === 'MARKET_MANAGER');
       const ownerUsrForActive = ownerMemForActive ? resUsers.rows.find(u => u.id === ownerMemForActive.user_id) : null;
 
       if (globalSettings) {
@@ -2834,7 +2816,14 @@ export async function resolveAuthContext(verifiedSupabaseUid: string): Promise<A
   const contexts: any[] = [];
 
   if (isPlatformOwner) {
-    // Gate 4 & Gate 12: Platform Owner has ZERO tenant memberships. tenant_id = SYSTEM_GLOBAL ONLY.
+    // Gate 3 & Gate 9: Platform Owner zero membership invariant check
+    if (user) {
+      const mmCheck = await pool.query('SELECT id FROM public.market_memberships WHERE user_id::text = $1::text', [user.id]);
+      if (mmCheck.rows.length > 0) {
+        console.warn(`SECURITY ALERT: Platform Owner ${user.id} has ${mmCheck.rows.length} tenant memberships. Treating tenant memberships as data corruption and denying tenant context.`);
+      }
+    }
+
     contexts.push({
       persona: 'PLATFORM_OWNER',
       context_id: 'mem-platform-owner',
@@ -2857,7 +2846,7 @@ export async function resolveAuthContext(verifiedSupabaseUid: string): Promise<A
   }
 
   // 3. Query market memberships for staff/managers
-  // Gate 5: Manager canonical role: MARKET_MANAGER, Employee canonical role: EMPLOYEE
+  // Gate 4, Gate 5, Gate 6, Gate 7: Strict role whitelist
   if (user) {
     const mmRes = await pool.query(`
       SELECT mm.id as context_id, mm.market_id, mm.role, mm.permissions, mm.status, m.name as market_name
@@ -2874,18 +2863,33 @@ export async function resolveAuthContext(verifiedSupabaseUid: string): Promise<A
       }
 
       const roleUpper = (mm.role || '').toUpperCase();
-      const isEmp = roleUpper === 'EMPLOYEE';
-      const canonicalRole = isEmp ? 'EMPLOYEE' : 'MARKET_MANAGER';
+      let persona: 'MARKET_MANAGER' | 'EMPLOYEE' | null = null;
+      let roleLabelKu = '';
+      let assignedPermissions: string[] = [];
+
+      if (roleUpper === 'MARKET_MANAGER') {
+        persona = 'MARKET_MANAGER';
+        roleLabelKu = 'بەڕێوەبەری مارکێت';
+        assignedPermissions = ['ALL', ...APPROVED_PERMISSIONS];
+      } else if (roleUpper === 'EMPLOYEE') {
+        persona = 'EMPLOYEE';
+        roleLabelKu = 'کارمەند';
+        assignedPermissions = perms; // Strictly permissions stored in DB
+      } else {
+        // Gate 4 & Gate 7: Fail closed on unknown or corrupted role
+        console.warn(`SECURITY ALERT: Unknown or corrupt membership role '${mm.role}' in context ${mm.context_id} for user ${user.id}`);
+        continue;
+      }
 
       contexts.push({
-        persona: isEmp ? 'EMPLOYEE' : 'MARKET_MANAGER',
+        persona,
         context_id: mm.context_id,
         tenant_id: mm.market_id,
         marketId: mm.market_id,
         tenant_name: mm.market_name,
-        role: canonicalRole,
-        role_label_ku: isEmp ? 'کارمەند' : 'بەڕێوەبەری مارکێت',
-        permissions: isEmp ? perms : ['ALL', ...APPROVED_PERMISSIONS]
+        role: persona,
+        role_label_ku: roleLabelKu,
+        permissions: assignedPermissions
       });
     }
   }
@@ -3329,13 +3333,28 @@ export async function verifyTenantActor(req: express.Request): Promise<{
       try { perms = JSON.parse(member.permissions); } catch { perms = []; }
     }
 
-    return {
-      authorized: true,
-      userId: member.user_id,
-      marketId: member.market_id,
-      role: member.role,
-      permissions: perms
-    };
+    if (roleUpper === 'MARKET_MANAGER') {
+      return {
+        authorized: true,
+        userId: member.user_id,
+        marketId: member.market_id,
+        role: 'MARKET_MANAGER',
+        permissions: ['ALL', ...APPROVED_PERMISSIONS]
+      };
+    }
+
+    if (roleUpper === 'EMPLOYEE') {
+      return {
+        authorized: true,
+        userId: member.user_id,
+        marketId: member.market_id,
+        role: 'EMPLOYEE',
+        permissions: perms
+      };
+    }
+
+    console.warn(`SECURITY ALERT: Corrupted or unwhitelisted role '${member.role}' in verifyTenantActor for user ${member.user_id}`);
+    return { authorized: false, code: 'ROLE_UNAUTHORIZED', message: 'ڕۆڵی نەناسراو یان بەکارنه‌هاتوو (Access Denied)' };
   } catch (err) {
     console.error('Error verifying tenant actor in DB:', err);
     return { authorized: false, code: 'INTERNAL_ERROR', message: 'خەتای سێرڤەر ڕوویدا' };
@@ -3443,12 +3462,12 @@ export async function verifyTenantPermission(
       return { authorized: false };
     }
 
-    if (['OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER', 'ADMIN'].includes(roleUpper)) {
+    if (roleUpper === 'MARKET_MANAGER') {
       return {
         authorized: true,
         userId: member.user_id,
         marketId: member.market_id,
-        role: member.role,
+        role: 'MARKET_MANAGER',
         permissions: ['ALL', ...APPROVED_PERMISSIONS]
       };
     }
@@ -3474,7 +3493,8 @@ export async function verifyTenantPermission(
       }
     }
 
-    res.status(403).json({ status: 'error', code: 'ACCESS_DENIED', message: 'دەستگەیشتن ڕەتکرایەوە' });
+    console.warn(`SECURITY ALERT: Corrupted or unwhitelisted role '${member.role}' in verifyTenantPermission for user ${member.user_id}`);
+    res.status(403).json({ status: 'error', code: 'ROLE_UNAUTHORIZED', message: 'ڕۆڵی نەناسراو یان بەکارنه‌هاتوو (Access Denied)' });
     return { authorized: false };
   } catch (err) {
     console.error('Error verifying tenant permission in DB:', err);
@@ -4106,7 +4126,7 @@ app.get('/api/platform/overview', async (req, res) => {
 
   try {
     const resMarkets = await pool.query(`SELECT status, count(*) FROM public.markets WHERE id != 'SYSTEM_GLOBAL' GROUP BY status`);
-    const resManagers = await pool.query(`SELECT count(*) FROM public.market_memberships WHERE role IN ('OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER')`);
+    const resManagers = await pool.query(`SELECT count(*) FROM public.market_memberships WHERE role IN ('MARKET_MANAGER', 'EMPLOYEE')`);
 
     let total = 0, active = 0, suspended = 0;
     resMarkets.rows.forEach(r => {
@@ -4170,7 +4190,7 @@ app.get('/api/platform/markets', async (req, res) => {
         0 as customers_count,
         'IQD' as currency
       FROM public.markets m
-      LEFT JOIN public.market_memberships mm ON mm.market_id = m.id AND mm.role IN ('OWNER', 'MARKET_OWNER', 'MARKET_MANAGER')
+      LEFT JOIN public.market_memberships mm ON mm.market_id = m.id AND mm.role = 'MARKET_MANAGER'
       LEFT JOIN public.users u ON mm.user_id = u.id
       WHERE m.id != 'SYSTEM_GLOBAL'
       ORDER BY m.created_at DESC
@@ -4238,7 +4258,7 @@ app.post('/api/platform/markets', async (req, res) => {
     name: initialManagerName,
     phone: managerLoginPhone,
     password: '',
-    role: 'MARKET_OWNER',
+    role: 'MARKET_MANAGER',
     status: 'PENDING_ACTIVATION',
     permissions: ['ALL', 'ADD_DEBT', 'RECEIVE_PAYMENT', 'ADD_CUSTOMER', 'REVERSE_TRANSACTION', 'VIEW_ANALYTICS', 'EXPORT_STATEMENTS', 'MANAGE_CREDIT_LIMIT'],
     created_at: new Date().toISOString()
@@ -4309,7 +4329,7 @@ app.post('/api/platform/markets', async (req, res) => {
         // 3. Insert Membership
         await client.query(`
           INSERT INTO public.market_memberships (id, market_id, user_id, role, permissions, status, created_at, updated_at)
-          VALUES ($1, $2, $3, 'OWNER', '["all"]'::jsonb, 'PENDING_ACTIVATION', NOW(), NOW())
+          VALUES ($1, $2, $3, 'MARKET_MANAGER', '["all"]'::jsonb, 'PENDING_ACTIVATION', NOW(), NOW())
           ON CONFLICT DO NOTHING;
         `, [memId, marketId, userId]);
 
@@ -4542,7 +4562,7 @@ app.post('/api/platform/markets/:market_id/managers', async (req, res) => {
 
   const userId = crypto.randomUUID();
   const memId = `mem-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-  const targetRole = role === 'MARKET_OWNER' ? 'OWNER' : 'MANAGER';
+  const targetRole = 'MARKET_MANAGER';
 
   const rawActivationToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(rawActivationToken).digest('hex');
@@ -4711,11 +4731,11 @@ app.get('/api/platform/account-operations', async (req, res) => {
           u.auth_user_id
         FROM public.market_memberships mm
         JOIN public.users u ON mm.user_id = u.id
-        WHERE mm.market_id = $1 AND mm.role IN ('OWNER', 'MARKET_OWNER', 'MANAGER', 'MARKET_MANAGER')
+        WHERE mm.market_id = $1 AND mm.role IN ('MARKET_MANAGER', 'EMPLOYEE')
         ORDER BY mm.created_at DESC;
       `, [m.market_id]);
 
-      const ownerMemInRows = memsRes.rows.find((r: any) => r.manager_role === 'OWNER' || r.manager_role === 'MARKET_OWNER') || memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
+      const ownerMemInRows = memsRes.rows.find((r: any) => r.manager_role === 'MARKET_MANAGER') || memsRes.rows.find((r: any) => r.membership_status === 'ACTIVE') || memsRes.rows[0];
       const registeredPhone = ownerMemInRows?.manager_login_phone || localM?.registered_phone || localM?.owner_phone || '07501234567';
 
       const tokensRes = await pool.query(`
@@ -4733,7 +4753,7 @@ app.get('/api/platform/account-operations', async (req, res) => {
       let managerUserId = primaryMem ? primaryMem.user_id : `usr-${m.market_id}`;
       let managerLoginPhone = primaryMem?.manager_login_phone || localM?.manager_login_phone || registeredPhone;
       let managerEmail = primaryMem?.manager_email || localM?.owner_email || '';
-      let managerRole = primaryMem?.manager_role || 'MANAGER';
+      let managerRole = primaryMem?.manager_role || 'MARKET_MANAGER';
       let membershipId = primaryMem?.membership_id || `mem-${m.market_id}`;
 
       const token = tokensRes.rows.find((t: any) => t.user_id === managerUserId || t.status === 'PENDING');
@@ -5053,7 +5073,7 @@ app.post('/api/platform/markets/:market_id/replace-manager', async (req, res) =>
 
       await client.query(`
         INSERT INTO public.market_memberships (id, market_id, user_id, role, permissions, status, created_at, updated_at)
-        VALUES ($1, $2, $3, 'MANAGER', '["all"]'::jsonb, 'PENDING_ACTIVATION', NOW(), NOW());
+        VALUES ($1, $2, $3, 'MARKET_MANAGER', '["all"]'::jsonb, 'PENDING_ACTIVATION', NOW(), NOW());
       `, [candidateMemId, market_id, candidateUserId]);
 
       await client.query(`
@@ -5992,7 +6012,7 @@ app.post('/api/auth/activate', async (req, res) => {
         const oldMemsRes = await client.query(`
           UPDATE public.market_memberships
           SET status = 'REVOKED', updated_at = NOW()
-          WHERE market_id = $1 AND user_id != $2 AND status = 'ACTIVE' AND role IN ('OWNER', 'MARKET_OWNER', 'MANAGER')
+          WHERE market_id = $1 AND user_id != $2 AND status = 'ACTIVE' AND role = 'MARKET_MANAGER'
           RETURNING user_id;
         `, [record.market_id, record.user_id]);
 

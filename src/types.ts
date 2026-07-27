@@ -230,7 +230,7 @@ export type SortOption = 'newest' | 'oldest' | 'highest_debt' | 'lowest_debt' | 
 
 export type ActiveScreen = 'home' | 'customer_profile' | 'search' | 'settings';
 
-export type AuthPersona = 'PLATFORM_OWNER' | 'MARKET_OWNER' | 'MANAGER' | 'EMPLOYEE' | 'CUSTOMER';
+export type AuthPersona = 'PLATFORM_OWNER' | 'MARKET_MANAGER' | 'EMPLOYEE' | 'CUSTOMER';
 
 export interface AuthorizedContext {
   context_id: string;
@@ -307,7 +307,7 @@ export interface PlatformManager {
   full_name: string;
   email: string;
   phone?: string;
-  role: 'MARKET_OWNER' | 'MANAGER' | 'OWNER';
+  role: 'MARKET_MANAGER' | 'EMPLOYEE';
   status: 'ACTIVE' | 'SUSPENDED' | 'REVOKED';
   permissions: string[];
   created_at: string;
@@ -327,7 +327,7 @@ export interface SystemUser {
   name: string;
   phone: string;
   password: string;
-  role: 'MARKET_OWNER' | 'MANAGER' | 'EMPLOYEE';
+  role: 'MARKET_MANAGER' | 'EMPLOYEE';
   status: 'ACTIVE' | 'INACTIVE' | 'PENDING_ACTIVATION' | 'SUSPENDED' | 'REVOKED';
   permissions: string[];
   created_at: string;
