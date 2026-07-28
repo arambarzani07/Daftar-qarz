@@ -34,6 +34,8 @@ interface SettingsScreenProps {
   defaultSort: SortOption;
   onUpdateDefaultSort: (sort: SortOption) => void;
   onLogout?: () => Promise<void> | void;
+  userRole?: string;
+  userPermissions?: string[];
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
@@ -42,8 +44,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   onBack,
   defaultSort,
   onUpdateDefaultSort,
-  onLogout
+  onLogout,
+  userRole,
+  userPermissions
 }) => {
+  const isManager = userRole === 'MARKET_MANAGER' || !userRole; // Default to true if not specified for backward compatibility
+
   const [activeModal, setActiveModal] = useState<
     'ACCOUNT' | 'STAFF' | 'MODE' | 'TUTORIAL' | 'PIN' | 'PASSWORD' | 'LANGUAGE' | 'SORT' | 'CONTACT' | 'LOGOUT' | 'DATABASE' | null
   >(null);
@@ -80,6 +86,17 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [pinEnabled, setPinEnabled] = useState(settings.pin_enabled || false);
   const [pinCode, setPinCode] = useState(settings.pin_code || '1234');
   const [language, setLanguage] = useState<'ku' | 'ar' | 'en'>(settings.language || 'ku');
+
+  // Sync local states with settings prop updates from parent
+  useEffect(() => {
+    setMarketName(settings.market_name || '');
+    setOwnerName(settings.owner_name || '');
+    setDefaultCurrency(settings.default_currency || 'IQD');
+    setTheme(settings.theme || 'dark');
+    setPinEnabled(settings.pin_enabled || false);
+    setPinCode(settings.pin_code || '1234');
+    setLanguage(settings.language || 'ku');
+  }, [settings]);
 
   // Password Form State
   const [currentPassword, setCurrentPassword] = useState('');
@@ -261,15 +278,26 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
 
         {/* 1.5. Staff & Permissions Management */}
         <button
-          onClick={() => setActiveModal('STAFF')}
-          className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
+          onClick={() => {
+            if (!isManager) {
+              showToast('تەنها بەڕێوەبەر مافی دەستکاریی دەسەڵاتی کارمەندانی هەیە');
+              return;
+            }
+            setActiveModal('STAFF');
+          }}
+          className={`w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors ${!isManager ? 'opacity-70' : ''}`}
         >
           <div className="flex items-center gap-3.5">
             <Users className="w-5 h-5 text-emerald-400 stroke-[1.75]" />
-            <span className="text-base font-bold text-[#F5F5F7]">کارمەندان و دەسەڵاتەکان</span>
+            <span className="text-base font-bold text-[#F5F5F7] flex items-center gap-1.5">
+              <span>کارمەندان و دەسەڵاتەکان</span>
+              {!isManager && <Lock className="w-3.5 h-3.5 text-amber-500" />}
+            </span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-[#34C759] font-bold">زیادکردن و دەسەڵات</span>
+            <span className="text-xs text-[#34C759] font-bold">
+              {isManager ? 'زیادکردن و دەسەڵات' : 'تایبەت بە بەڕێوەبەر'}
+            </span>
             <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
           </div>
         </button>
@@ -413,8 +441,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 type="text"
                 value={marketName}
                 onChange={(e) => setMarketName(e.target.value)}
-                disabled={settings.is_locked_by_system}
-                className={`w-full bg-black text-sm text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759] ${settings.is_locked_by_system ? 'opacity-60 cursor-not-allowed bg-[#111113]' : ''}`}
+                disabled={settings.is_locked_by_system || !isManager}
+                className={`w-full bg-black text-sm text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759] ${(settings.is_locked_by_system || !isManager) ? 'opacity-60 cursor-not-allowed bg-[#111113]' : ''}`}
                 placeholder="ناوی شوێن..."
               />
             </div>
@@ -424,8 +452,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 type="text"
                 value={ownerName}
                 onChange={(e) => setOwnerName(e.target.value)}
-                disabled={settings.is_locked_by_system}
-                className={`w-full bg-black text-sm text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759] ${settings.is_locked_by_system ? 'opacity-60 cursor-not-allowed bg-[#111113]' : ''}`}
+                disabled={settings.is_locked_by_system || !isManager}
+                className={`w-full bg-black text-sm text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759] ${(settings.is_locked_by_system || !isManager) ? 'opacity-60 cursor-not-allowed bg-[#111113]' : ''}`}
                 placeholder="ناوی خاوەن شوێن..."
               />
             </div>
@@ -444,18 +472,26 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 <span>ئەم زانیاریانە لەلایەن خاوەنی سیستەمەوە دروستکراون و قوفڵکراون (ناتوانیت دەستکارییان بکەیت).</span>
               </div>
             )}
+            {!isManager && (
+              <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400 text-xs">
+                <Lock className="w-4 h-4 shrink-0" />
+                <span>دەستکاری زانیارییەکانی شوێن تەنها تایبەتە بە بەڕێوەبەر.</span>
+              </div>
+            )}
             <div>
               <label className="block text-xs text-[#8E8E93] mb-1">کۆدی ناسنامەی تێنەنت (Tenant ID)</label>
               <div className="w-full bg-[#000000] text-xs text-[#8E8E93] p-3 rounded-xl border border-[#2C2C2E] font-mono">
                 {settings.market_id || 'market-default'}
               </div>
             </div>
-            <button
-              onClick={handleSaveMarketInfo}
-              className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale"
-            >
-              پاشەکەوتکردن
-            </button>
+            {isManager && (
+              <button
+                onClick={handleSaveMarketInfo}
+                className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale"
+              >
+                پاشەکەوتکردن
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -609,10 +645,17 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             <div className="flex items-center justify-between bg-black p-3.5 rounded-xl border border-[#2C2C2E]">
               <span className="text-sm font-bold text-[#F5F5F7]">چالاککردنی پین کۆد</span>
               <button
-                onClick={() => setPinEnabled(!pinEnabled)}
+                onClick={() => {
+                  if (!isManager) {
+                    showToast('تەنها بەڕێوەبەر دەتوانێت ڕێکخستنی پین کۆد بگۆڕێت');
+                    return;
+                  }
+                  setPinEnabled(!pinEnabled);
+                }}
+                disabled={!isManager}
                 className={`w-12 h-7 rounded-full p-1 transition-colors ${
                   pinEnabled ? 'bg-[#34C759]' : 'bg-[#2C2C2E]'
-                }`}
+                } ${!isManager ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 <div
                   className={`w-5 h-5 rounded-full bg-white transition-transform ${
@@ -629,19 +672,30 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                   type="password"
                   maxLength={4}
                   value={pinCode}
-                  onChange={(e) => setPinCode(e.target.value.replace(/\D/g, ''))}
-                  className="w-full bg-black text-center text-xl font-mono tracking-widest text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759]"
+                  onChange={(e) => {
+                    if (!isManager) return;
+                    setPinCode(e.target.value.replace(/\D/g, ''));
+                  }}
+                  disabled={!isManager}
+                  className={`w-full bg-black text-center text-xl font-mono tracking-widest text-[#F5F5F7] p-3 rounded-xl border border-[#2C2C2E] focus:outline-none focus:border-[#34C759] ${!isManager ? 'opacity-50 cursor-not-allowed' : ''}`}
                   placeholder="••••"
                 />
               </div>
             )}
 
-            <button
-              onClick={handleSavePin}
-              className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale"
-            >
-              پاشەکەوتکردن
-            </button>
+            {!isManager ? (
+              <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400 text-xs">
+                <Lock className="w-4 h-4 shrink-0" />
+                <span>تەنها بەڕێوەبەری سەرەکی دەتوانێت ڕێکخستنی پین کۆد بگۆڕێت.</span>
+              </div>
+            ) : (
+              <button
+                onClick={handleSavePin}
+                className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale"
+              >
+                پاشەکەوتکردن
+              </button>
+            )}
           </div>
         </div>
       )}

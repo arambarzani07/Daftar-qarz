@@ -31,6 +31,7 @@ import { ShareLinkSheet } from './components/ShareLinkSheet';
 import { PublicCustomerBalanceView } from './components/PublicCustomerBalanceView';
 import { CustomerPortalView } from './components/CustomerPortalView';
 import { EditTransactionModal } from './components/EditTransactionModal';
+import { PrintStatementPage } from './components/PrintStatementPage';
 
 import { PlatformOwnerDashboard } from './components/platform/PlatformOwnerDashboard';
 
@@ -304,7 +305,8 @@ export default function App() {
       marketId = '';
     }
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+    const rawToken = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+    const token = rawToken ? rawToken.replace(/[^a-zA-Z0-9_\-.]/g, '').trim() : '';
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
@@ -492,9 +494,8 @@ export default function App() {
     if (!confirmRev) return;
 
     try {
-      const res = await fetch(`/api/customers/${selectedCustomer.id}/transactions/${tx.id}/reverse`, {
+      const res = await apiFetch(`/api/customers/${selectedCustomer.id}/transactions/${tx.id}/reverse`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'هەڵوەشاندنەوە لەلایەن خاوەن کار' })
       });
       const json = await res.json();
@@ -519,9 +520,8 @@ export default function App() {
   ) => {
     if (!selectedCustomer) return;
     try {
-      const res = await fetch(`/api/customers/${selectedCustomer.id}/transactions/${txId}`, {
+      const res = await apiFetch(`/api/customers/${selectedCustomer.id}/transactions/${txId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...updatedData,
           updated_by: summary?.settings?.owner_name || authState.activeContext?.tenant_name || 'خاوەن کار'
@@ -545,9 +545,8 @@ export default function App() {
   // Update Settings
   const handleUpdateSettings = async (newSettings: Partial<AppSettings>) => {
     try {
-      const res = await fetch('/api/settings', {
+      const res = await apiFetch('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newSettings)
       });
       const json = await res.json();
@@ -600,6 +599,11 @@ export default function App() {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }
 
+  // 3c. Print Statement Route (A4 High-Fidelity Printable View)
+  if (path.startsWith('/market/print-statement') || path.startsWith('/customer/print-statement')) {
+    return <PrintStatementPage />;
+  }
+
   // 4. Context Selection View (Multi-market manager)
   if (authStatus === 'SELECT_CONTEXT' || path === '/auth/select-context') {
     return (
@@ -640,6 +644,11 @@ export default function App() {
     );
   }
 
+  const isManager = authState.activeContext?.role === 'MARKET_MANAGER' || !authState.activeContext?.role;
+  const canAddCustomer = isManager || !!(authState.activeContext?.permissions?.includes('ADD_CUSTOMER'));
+  const canAddDebt = isManager || !!(authState.activeContext?.permissions?.includes('ADD_DEBT'));
+  const canReceivePayment = isManager || !!(authState.activeContext?.permissions?.includes('RECEIVE_PAYMENT'));
+
   return (
     <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] font-sans antialiased flex flex-col">
 
@@ -651,10 +660,17 @@ export default function App() {
           <TopActionBar
             marketName={authState.activeContext?.tenant_name || summary?.market_name || summary?.settings?.market_name}
             onRefresh={handleRefresh}
-            onAddCustomer={() => setIsAddCustomerOpen(true)}
+            onAddCustomer={() => {
+              if (!canAddCustomer) {
+                alert('تۆ دەسەڵاتی زیادکردنی کڕیاری نوێت نییە');
+                return;
+              }
+              setIsAddCustomerOpen(true);
+            }}
             onOpenSearch={() => setActiveScreen('search')}
             onOpenSettings={() => setActiveScreen('settings')}
             isRefreshing={isRefreshing}
+            canAddCustomer={canAddCustomer}
           />
 
           {/* Financial Summary Card */}
@@ -668,13 +684,20 @@ export default function App() {
           <CustomerList
             customers={customers}
             onSelectCustomer={handleSelectCustomer}
-            onAddCustomer={() => setIsAddCustomerOpen(true)}
+            onAddCustomer={() => {
+              if (!canAddCustomer) {
+                alert('تۆ دەسەڵاتی زیادکردنی کڕیاری نوێت نییە');
+                return;
+              }
+              setIsAddCustomerOpen(true);
+            }}
             currentSort={currentSort}
             onSortChange={(s) => {
               setCurrentSort(s);
               loadCustomers(s, searchQuery);
             }}
             isLoading={isLoadingCustomers}
+            canAddCustomer={canAddCustomer}
           />
         </div>
       )}
@@ -719,6 +742,8 @@ export default function App() {
             customerCurrency={selectedCustomer.currency}
             onAddTransaction={handleAddTransaction}
             isSubmitting={isSubmitting}
+            canAddDebt={canAddDebt}
+            canReceivePayment={canReceivePayment}
           />
 
           {/* Customer Statement Modal (Phase 2 Statement & Export Engine) */}
@@ -727,6 +752,7 @@ export default function App() {
             onClose={() => setIsStatementModalOpen(false)}
             customer={selectedCustomer}
             marketName={authState.activeContext?.tenant_name || summary?.market_name || 'ژیرۆکس'}
+            settings={summary?.settings || undefined}
             onOpenAdvancedProfile={() => {
               setIsStatementModalOpen(false);
               setIsAdvancedProfileOpen(true);
@@ -745,6 +771,8 @@ export default function App() {
               loadSummary();
               if (selectedCustomer) loadCustomerTransactions(selectedCustomer.id);
             }}
+            userRole={authState.activeContext?.role}
+            userPermissions={authState.activeContext?.permissions}
           />
 
           {/* Share Live Link Sheet */}
@@ -763,7 +791,12 @@ export default function App() {
             }}
             transaction={editingTransaction}
             onSave={handleEditTxSubmit}
-            onReverse={handleReverseTx}
+            onReverse={
+              authState.activeContext?.role === 'MARKET_MANAGER' ||
+              (authState.activeContext?.permissions && authState.activeContext.permissions.includes('REVERSE_TRANSACTION'))
+                ? handleReverseTx
+                : undefined
+            }
           />
         </div>
       )}
@@ -831,6 +864,8 @@ export default function App() {
           defaultSort={currentSort}
           onUpdateDefaultSort={(s) => setCurrentSort(s)}
           onLogout={signOut}
+          userRole={authState.activeContext?.role}
+          userPermissions={authState.activeContext?.permissions}
         />
       )}
 

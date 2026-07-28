@@ -1,5 +1,6 @@
 export function getAuthHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+  const rawToken = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+  const token = rawToken ? rawToken.replace(/[^a-zA-Z0-9_\-.]/g, '').trim() : '';
   const activeCtxStr = typeof window !== 'undefined' ? localStorage.getItem('zhirox_active_context') : null;
   let marketId = '';
   if (activeCtxStr) {
@@ -26,7 +27,8 @@ export function getAuthHeaders(customHeaders: Record<string, string> = {}): Reco
 }
 
 export async function authenticatedFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+  const rawToken = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
+  const token = rawToken ? rawToken.replace(/[^a-zA-Z0-9_\-.]/g, '').trim() : '';
   const activeCtxStr = typeof window !== 'undefined' ? localStorage.getItem('zhirox_active_context') : null;
   let marketId = '';
   if (activeCtxStr) {

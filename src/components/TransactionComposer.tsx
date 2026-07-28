@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { CurrencyType } from '../types';
 import { formatMoney } from '../utils/formatters';
-import { ChevronUp, ChevronDown, PlusCircle, ArrowDownCircle, Tag, Sparkles, Check, DollarSign } from 'lucide-react';
+import { ChevronUp, ChevronDown, PlusCircle, ArrowDownCircle, Tag, Sparkles, Check, DollarSign, Lock } from 'lucide-react';
 
 interface TransactionComposerProps {
   balanceIqd: number;
@@ -14,6 +14,8 @@ interface TransactionComposerProps {
     note: string
   ) => Promise<void>;
   isSubmitting?: boolean;
+  canAddDebt?: boolean;
+  canReceivePayment?: boolean;
 }
 
 const IQD_PRESETS = [5000, 10000, 25000, 50000, 100000];
@@ -32,7 +34,9 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
   balanceUsd,
   customerCurrency,
   onAddTransaction,
-  isSubmitting = false
+  isSubmitting = false,
+  canAddDebt = true,
+  canReceivePayment = true
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [amount, setAmount] = useState('');
@@ -355,23 +359,55 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
               {/* Add Debt Button (RIGHT in RTL) */}
               <button
                 id="btn-add-debt"
-                onClick={() => handleDirectSubmit('DEBT_ADD')}
-                disabled={isSubmitting}
-                className="py-3.5 px-3 rounded-2xl text-xs sm:text-sm font-black bg-gradient-to-r from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white shadow-lg shadow-rose-950/30 border border-rose-400/30 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                onClick={() => {
+                  if (!canAddDebt) {
+                    setErrorMessage('تۆ دەسەڵاتی تۆمارکردنی قەرزی نوێت نییە');
+                    return;
+                  }
+                  handleDirectSubmit('DEBT_ADD');
+                }}
+                disabled={isSubmitting || !canAddDebt}
+                className={`py-3.5 px-3 rounded-2xl text-xs sm:text-sm font-black transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 ${
+                  canAddDebt
+                    ? 'bg-gradient-to-r from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white shadow-lg shadow-rose-950/30 border border-rose-400/30'
+                    : 'bg-[#2C2C2E] text-[#8E8E93] border border-[#3A3A3C] cursor-not-allowed'
+                }`}
               >
-                <PlusCircle className="w-4 h-4 shrink-0" />
-                <span>{isSubmitting ? 'تۆمارکردن...' : 'پێدانی قەرز (+)'}</span>
+                {canAddDebt ? (
+                  <PlusCircle className="w-4 h-4 shrink-0" />
+                ) : (
+                  <Lock className="w-4 h-4 text-amber-500 shrink-0" />
+                )}
+                <span>
+                  {isSubmitting ? 'تۆمارکردن...' : canAddDebt ? 'پێدانی قەرز (+)' : 'قەرز ڕێگەپێنەدراوە'}
+                </span>
               </button>
 
               {/* Receive Payment Button (LEFT in RTL) */}
               <button
                 id="btn-receive-payment"
-                onClick={() => handleDirectSubmit('PAYMENT_RECEIVE')}
-                disabled={isSubmitting}
-                className="py-3.5 px-3 rounded-2xl text-xs sm:text-sm font-black bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-black shadow-lg shadow-emerald-950/30 border border-emerald-400/30 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                onClick={() => {
+                  if (!canReceivePayment) {
+                    setErrorMessage('تۆ دەسەڵاتی تۆمارکردنی وەرگرتنەوەی پارەت نییە');
+                    return;
+                  }
+                  handleDirectSubmit('PAYMENT_RECEIVE');
+                }}
+                disabled={isSubmitting || !canReceivePayment}
+                className={`py-3.5 px-3 rounded-2xl text-xs sm:text-sm font-black transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 ${
+                  canReceivePayment
+                    ? 'bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-black shadow-lg shadow-emerald-950/30 border border-emerald-400/30'
+                    : 'bg-[#2C2C2E] text-[#8E8E93] border border-[#3A3A3C] cursor-not-allowed'
+                }`}
               >
-                <ArrowDownCircle className="w-4 h-4 shrink-0" />
-                <span>{isSubmitting ? 'تۆمارکردن...' : 'وەرگرتنەوەی پارە (-)'}</span>
+                {canReceivePayment ? (
+                  <ArrowDownCircle className="w-4 h-4 shrink-0" />
+                ) : (
+                  <Lock className="w-4 h-4 text-amber-500 shrink-0" />
+                )}
+                <span>
+                  {isSubmitting ? 'تۆمارکردن...' : canReceivePayment ? 'وەرگرتنەوەی پارە (-)' : 'وەرگرتن ڕێگەپێنەدراوە'}
+                </span>
               </button>
             </div>
 

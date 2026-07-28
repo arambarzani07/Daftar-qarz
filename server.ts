@@ -18,13 +18,32 @@ export const CANONICAL_MARKET_ROLE = 'MARKET_MANAGER';
 app.use(express.json());
 
 // Supabase Connection Setup
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
-const DATABASE_URL = process.env.DATABASE_URL || '';
+function cleanServerEnv(val: string | undefined): string {
+  if (!val) return '';
+  let cleaned = val.trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
 
-export const pool = DATABASE_URL ? new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }) : null;
+const SUPABASE_URL = cleanServerEnv(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL);
+const SUPABASE_KEY = cleanServerEnv(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY);
+const DATABASE_URL = cleanServerEnv(process.env.DATABASE_URL || process.env.POSTGRES_URL);
 
-export const supabase = (SUPABASE_URL && SUPABASE_KEY)
+export const pool = DATABASE_URL ? new pg.Pool({ 
+  connectionString: DATABASE_URL, 
+  ssl: { rejectUnauthorized: false },
+  max: 15,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
+}) : null;
+
+const isPlaceholderUrlOrKey = (url: string, key: string) => {
+  return !url || url.includes('placeholder') || !key || key.includes('placeholder') || key.length < 20;
+};
+
+export const supabase = (SUPABASE_URL && SUPABASE_KEY && !isPlaceholderUrlOrKey(SUPABASE_URL, SUPABASE_KEY))
   ? createClient(SUPABASE_URL, SUPABASE_KEY, {
       auth: { persistSession: false }
     })
@@ -402,7 +421,10 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
   try {
     const client = await pool.connect();
     try {
-      // Load tables in parallel
+      // Load tables in parallel with strict tenant separation by market ID if provided
+      const hasMkt = requestedMarketId && requestedMarketId !== 'SYSTEM_GLOBAL';
+      const mktParams = hasMkt ? [requestedMarketId] : [];
+
       const [
         resUsers,
         resMarkets,
@@ -419,24 +441,117 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         resAttachments,
         resDisputes,
         resAudit,
-        resSettings
+        resSettings,
+        resTokens,
+        resApprovals,
+        resUnlocks,
+        resPolicies
       ] = await Promise.all([
         client.query('SELECT * FROM public.users').catch(() => ({ rows: [] })),
         client.query('SELECT * FROM public.markets').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.market_memberships').catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.market_memberships WHERE market_id = $1' 
+            : 'SELECT * FROM public.market_memberships',
+          mktParams
+        ).catch(() => ({ rows: [] })),
         client.query('SELECT * FROM public.platform_access').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_auth_links').catch(() => ({ rows: [] })),
-        client.query(`SELECT * FROM public.customers WHERE status != 'DELETED'`).catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.ledger_entries WHERE is_reversed = false').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_share_links').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_credit_settings').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_debt_controls').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.payment_promises').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_reminders').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_attachments').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.customer_disputes').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.audit_logs').catch(() => ({ rows: [] })),
-        client.query('SELECT * FROM public.market_settings').catch(() => ({ rows: [] }))
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_auth_links WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_auth_links',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? "SELECT * FROM public.customers WHERE status != 'DELETED' AND market_id = $1" 
+            : "SELECT * FROM public.customers WHERE status != 'DELETED'",
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.ledger_entries WHERE is_reversed = false AND market_id = $1' 
+            : 'SELECT * FROM public.ledger_entries WHERE is_reversed = false',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_share_links WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_share_links',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_credit_settings WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_credit_settings',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_debt_controls WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_debt_controls',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.payment_promises WHERE market_id = $1' 
+            : 'SELECT * FROM public.payment_promises',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_reminders WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_reminders',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_attachments WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_attachments',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.customer_disputes WHERE market_id = $1' 
+            : 'SELECT * FROM public.customer_disputes',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.audit_logs WHERE market_id = $1' 
+            : 'SELECT * FROM public.audit_logs',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.market_settings WHERE market_id = $1' 
+            : 'SELECT * FROM public.market_settings',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.activation_tokens WHERE market_id = $1' 
+            : 'SELECT * FROM public.activation_tokens',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.approval_requests WHERE market_id = $1' 
+            : 'SELECT * FROM public.approval_requests',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.temporary_debt_unlocks WHERE market_id = $1' 
+            : 'SELECT * FROM public.temporary_debt_unlocks',
+          mktParams
+        ).catch(() => ({ rows: [] })),
+        client.query(
+          hasMkt 
+            ? 'SELECT * FROM public.market_protection_policies WHERE market_id = $1' 
+            : 'SELECT * FROM public.market_protection_policies',
+          mktParams
+        ).catch(() => ({ rows: [] }))
       ]);
 
       // Map users
@@ -490,16 +605,17 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         const custCount = resCustomers.rows.filter(c => c.market_id === m.id).length;
         
         // Lookup actual owner user from membership and user tables
-        const ownerMem = resMemberships.rows.find(mm => mm.market_id === m.id && mm.role === 'MARKET_MANAGER');
+        const ownerMem = resMemberships.rows.find(mm => mm.market_id === m.id && mm.role === 'MARKET_MANAGER' && mm.status === 'ACTIVE') ||
+                         resMemberships.rows.find(mm => mm.market_id === m.id && mm.role === 'MARKET_MANAGER');
         const ownerUsr = ownerMem ? resUsers.rows.find(u => u.id === ownerMem.user_id) : null;
 
         return {
           id: m.id,
           name: m.name,
           status: m.status,
-          owner_name: setRow?.owner_name || ownerUsr?.full_name || 'کاک کاوان',
+          owner_name: ownerUsr?.full_name || setRow?.owner_name || 'کاک کاوان',
           owner_email: ownerUsr?.email || `${m.id}@zhirox.com`,
-          owner_phone: setRow?.owner_phone || ownerUsr?.phone || '07501234567',
+          owner_phone: ownerUsr?.phone || setRow?.owner_phone || '07501234567',
           created_at: m.created_at?.toISOString ? m.created_at.toISOString() : new Date().toISOString(),
           license_expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
           managers_count: memCount,
@@ -650,18 +766,80 @@ export async function loadDbFromPostgres(requestedMarketId?: string): Promise<Zh
         timestamp: al.timestamp?.toISOString ? al.timestamp.toISOString() : new Date().toISOString()
       }));
 
+      // Map activation_tokens
+      data.activation_tokens = resTokens.rows.map(at => ({
+        id: at.id,
+        token_hash: at.token_hash,
+        market_id: at.market_id,
+        market_name: at.market_name || '',
+        user_id: at.user_id,
+        manager_name: at.manager_name || '',
+        manager_login_phone: at.manager_login_phone || '',
+        status: at.status,
+        purpose: at.purpose || 'REGISTER',
+        expires_at: at.expires_at?.toISOString ? at.expires_at.toISOString() : at.expires_at,
+        created_at: at.created_at?.toISOString ? at.created_at.toISOString() : new Date().toISOString()
+      }));
+
+      // Map approval_requests
+      data.approval_requests = resApprovals.rows.map(ar => ({
+        id: ar.id,
+        market_id: ar.market_id,
+        requested_by: ar.requested_by,
+        customer_id: ar.customer_id,
+        request_type: ar.request_type,
+        requested_amount: Number(ar.requested_amount || 0),
+        currency: ar.currency || 'IQD',
+        related_transaction_id: ar.related_transaction_id || null,
+        reason: ar.reason || '',
+        status: ar.status,
+        expires_at: ar.expires_at?.toISOString ? ar.expires_at.toISOString() : ar.expires_at,
+        requested_at: ar.requested_at?.toISOString ? ar.requested_at.toISOString() : ar.requested_at,
+        decision_by: ar.decision_by || null,
+        decision_at: ar.decision_at?.toISOString ? ar.decision_at.toISOString() : null,
+        decision_reason: ar.decision_reason || null,
+        consumed_at: ar.consumed_at?.toISOString ? ar.consumed_at.toISOString() : null
+      }));
+
+      // Map temporary_debt_unlocks
+      data.temporary_debt_unlocks = resUnlocks.rows.map(tu => ({
+        id: tu.id,
+        customer_id: tu.customer_id,
+        market_id: tu.market_id,
+        approved_by: tu.approved_by,
+        reason: tu.reason || '',
+        currency: tu.currency || 'IQD',
+        scope_type: tu.scope_type || 'SINGLE_TX',
+        maximum_amount: Number(tu.maximum_amount || 0),
+        status: tu.status,
+        expires_at: tu.expires_at?.toISOString ? tu.expires_at.toISOString() : tu.expires_at,
+        created_at: tu.created_at?.toISOString ? tu.created_at.toISOString() : new Date().toISOString()
+      }));
+
+      // Map market_protection_policies
+      data.market_protection_policies = resPolicies.rows.map(p => ({
+        market_id: p.market_id,
+        high_value_iqd_threshold: Number(p.high_value_iqd_threshold || 1000000),
+        high_value_usd_threshold: Number(p.high_value_usd_threshold || 1000),
+        require_approval_for_reversals: p.require_approval_for_reversals || false,
+        require_approval_for_credit_limit_change: p.require_approval_for_credit_limit_change || false,
+        max_temp_unlock_hours: Number(p.max_temp_unlock_hours || 24),
+        updated_at: p.updated_at?.toISOString ? p.updated_at.toISOString() : new Date().toISOString()
+      }));
+
       // Map market settings
       const globalSettings = (requestedMarketId && resSettings.rows.find(s => s.market_id === requestedMarketId)) || resSettings.rows[0];
       
       const activeMktId = requestedMarketId || '';
-      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && mm.role === 'MARKET_MANAGER');
+      const ownerMemForActive = resMemberships.rows.find(mm => mm.market_id === activeMktId && mm.role === 'MARKET_MANAGER' && mm.status === 'ACTIVE') ||
+                                resMemberships.rows.find(mm => mm.market_id === activeMktId && mm.role === 'MARKET_MANAGER');
       const ownerUsrForActive = ownerMemForActive ? resUsers.rows.find(u => u.id === ownerMemForActive.user_id) : null;
 
       if (globalSettings) {
         data.settings = {
           market_name: globalSettings.market_name || '',
-          owner_name: globalSettings.owner_name || ownerUsrForActive?.full_name || '',
-          owner_phone: globalSettings.owner_phone || ownerUsrForActive?.phone || '',
+          owner_name: ownerUsrForActive?.full_name || globalSettings.owner_name || '',
+          owner_phone: ownerUsrForActive?.phone || globalSettings.owner_phone || '',
           market_id: globalSettings.market_id || requestedMarketId || '',
           pin_enabled: globalSettings.pin_enabled || false,
           pin_code: globalSettings.pin_code || '',
@@ -699,6 +877,15 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
   try {
     await client.query('BEGIN;');
 
+    const getMarketId = (customerId?: string, itemMarketId?: string) => {
+      if (itemMarketId) return itemMarketId;
+      if (customerId) {
+        const cust = data.customers.find(c => c.id === customerId);
+        if (cust?.market_id) return cust.market_id;
+      }
+      return data.settings.market_id || '';
+    };
+
     // 1. Save Customers
     for (const c of data.customers) {
       await client.query(`
@@ -710,11 +897,12 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           phone = EXCLUDED.phone,
           notes = EXCLUDED.notes,
           updated_at = NOW();
-      `, [c.id, c.market_id || '', c.seq_num || 1, c.name, c.latin_name || null, c.phone || null, c.notes || null]);
+      `, [c.id, c.market_id || data.settings.market_id || '', c.seq_num || 1, c.name, c.latin_name || null, c.phone || null, c.notes || null]);
     }
 
     // 2. Save Ledger Entries
     for (const t of data.transactions) {
+      const mId = getMarketId(t.customer_id, t.market_id);
       await client.query(`
         INSERT INTO public.ledger_entries (
           id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, is_reversed, reversal_reason, reversed_at, reversed_by
@@ -726,7 +914,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           reversed_by = EXCLUDED.reversed_by;
       `, [
         t.id,
-        t.market_id || '',
+        mId,
         t.customer_id,
         t.currency || 'IQD',
         t.type === 'DEBT_ADD' ? 'DEBT_ADD' : 'PAYMENT_RECEIVE',
@@ -742,6 +930,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 3. Save Credit & Debt Lock Settings
     for (const cs of data.credit_settings) {
+      const mId = getMarketId(cs.customer_id, cs.market_id);
       await client.query(`
         INSERT INTO public.customer_credit_settings (
           id, market_id, customer_id, currency, limit_mode, limit_amount, is_enabled, updated_at
@@ -752,7 +941,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         `cs-${cs.customer_id}-IQD`,
-        data.settings.market_id || '',
+        mId,
         cs.customer_id,
         cs.limit_iqd > 0 ? 'HARD_LIMIT' : 'NO_LIMIT',
         cs.limit_iqd
@@ -768,7 +957,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         `cs-${cs.customer_id}-USD`,
-        data.settings.market_id || '',
+        mId,
         cs.customer_id,
         cs.limit_usd > 0 ? 'HARD_LIMIT' : 'NO_LIMIT',
         cs.limit_usd
@@ -783,7 +972,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           changed_at = NOW();
       `, [
         `dc-${cs.customer_id}`,
-        data.settings.market_id || '',
+        mId,
         cs.customer_id,
         cs.lock_status === 'LOCKED' ? 'LOCKED' : 'ACTIVE'
       ]);
@@ -791,6 +980,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 4. Save Share Links
     for (const sl of data.share_links) {
+      const mId = getMarketId(sl.customer_id, sl.market_id);
       await client.query(`
         INSERT INTO public.customer_share_links (
           id, market_id, customer_id, token, status, pin_code, access_count, last_accessed_at, created_at, updated_at
@@ -803,7 +993,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           updated_at = NOW();
       `, [
         sl.id,
-        sl.market_id || '',
+        mId,
         sl.customer_id,
         sl.token,
         sl.status,
@@ -815,6 +1005,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 5. Save Payment Promises
     for (const p of data.payment_promises) {
+      const mId = getMarketId(p.customer_id, p.market_id);
       await client.query(`
         INSERT INTO public.payment_promises (
           id, market_id, customer_id, currency, promised_amount, promise_date, note, status, created_at
@@ -824,7 +1015,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           note = EXCLUDED.note;
       `, [
         p.id,
-        p.market_id || '',
+        mId,
         p.customer_id,
         p.currency || 'IQD',
         p.amount,
@@ -836,6 +1027,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 6. Save Reminders
     for (const r of data.reminders) {
+      const mId = getMarketId(r.customer_id, r.market_id);
       await client.query(`
         INSERT INTO public.customer_reminders (
           id, market_id, customer_id, remind_at, note, priority, status, created_at
@@ -845,7 +1037,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           note = EXCLUDED.note;
       `, [
         r.id,
-        r.market_id || '',
+        mId,
         r.customer_id,
         r.follow_up_date ? new Date(r.follow_up_date) : new Date(),
         r.reason || null,
@@ -855,6 +1047,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 7. Save Attachments
     for (const a of data.attachments) {
+      const mId = getMarketId(a.customer_id, a.market_id);
       await client.query(`
         INSERT INTO public.customer_attachments (
           id, market_id, customer_id, file_name, file_size, storage_path, mime_type, uploaded_by, created_at
@@ -862,7 +1055,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
         ON CONFLICT (id) DO NOTHING;
       `, [
         a.id,
-        a.market_id || '',
+        mId,
         a.customer_id,
         a.file_name,
         100, // file size placeholder
@@ -874,6 +1067,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 8. Save Disputes
     for (const d of data.disputes) {
+      const mId = getMarketId(d.customer_id, d.market_id);
       await client.query(`
         INSERT INTO public.customer_disputes (
           id, market_id, customer_id, reason, status, opened_by, opened_at
@@ -882,7 +1076,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           status = EXCLUDED.status;
       `, [
         d.id,
-        data.settings.market_id || '',
+        mId,
         d.customer_id,
         d.title ? `${d.title}: ${d.description || ''}` : (d.description || ''),
         d.status,
@@ -892,6 +1086,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
 
     // 9. Save Audit Logs
     for (const al of data.audit_logs) {
+      const mId = getMarketId(al.customer_id || undefined, al.market_id);
       try {
         await client.query('SAVEPOINT audit_savepoint;');
         await client.query(`
@@ -901,7 +1096,7 @@ export async function saveDbToPostgres(data: ZhiroxDatabase) {
           ON CONFLICT (id) DO NOTHING;
         `, [
           al.id,
-          al.market_id || '',
+          mId,
           al.customer_id || null,
           al.action_type,
           al.description,
@@ -1069,13 +1264,11 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
   if (!pool && !dbClient) return;
   const exec = dbClient || pool;
   const balanceId = `bal-${customerId}-${currency}`;
-  
-  await exec!.query(`
-    INSERT INTO public.customer_balances (
-      id, market_id, customer_id, currency, balance, total_debt_added, total_payments_received, transaction_count, last_transaction_at, updated_at
-    ) VALUES (
-      $1::text, $2::text, $3::text, $4::text,
-      (
+
+  // First try updating existing balance row
+  const updateRes = await exec!.query(`
+    UPDATE public.customer_balances SET
+      balance = (
         SELECT COALESCE(SUM(
           CASE 
             WHEN l.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN l.amount
@@ -1091,9 +1284,9 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        WHERE l.market_id = $1::text AND l.customer_id = $2::text AND l.currency = $3::text
       ),
-      (
+      total_debt_added = (
         SELECT COALESCE(SUM(
           CASE 
             WHEN l.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN l.amount
@@ -1104,9 +1297,9 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        WHERE l.market_id = $1::text AND l.customer_id = $2::text AND l.currency = $3::text
       ),
-      (
+      total_payments_received = (
         SELECT COALESCE(SUM(
           CASE 
             WHEN l.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN l.amount
@@ -1117,24 +1310,79 @@ export async function updateCustomerBalanceForCurrency(marketId: string, custome
         ), 0)
         FROM public.ledger_entries l
         LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
-        WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        WHERE l.market_id = $1::text AND l.customer_id = $2::text AND l.currency = $3::text
       ),
-      (
-        SELECT COUNT(*)::integer FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
+      transaction_count = (
+        SELECT COUNT(*)::integer FROM public.ledger_entries WHERE market_id = $1::text AND customer_id = $2::text AND currency = $3::text
       ),
-      (
-        SELECT MAX(occurred_at) FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
+      last_transaction_at = (
+        SELECT MAX(occurred_at) FROM public.ledger_entries WHERE market_id = $1::text AND customer_id = $2::text AND currency = $3::text
       ),
-      NOW()
-    )
-    ON CONFLICT (market_id, customer_id, currency) DO UPDATE SET
-      balance = EXCLUDED.balance,
-      total_debt_added = EXCLUDED.total_debt_added,
-      total_payments_received = EXCLUDED.total_payments_received,
-      transaction_count = EXCLUDED.transaction_count,
-      last_transaction_at = EXCLUDED.last_transaction_at,
-      updated_at = NOW();
-  `, [balanceId, marketId, customerId, currency]);
+      updated_at = NOW()
+    WHERE market_id = $1::text AND customer_id = $2::text AND currency = $3::text
+  `, [marketId, customerId, currency]);
+
+  if ((updateRes.rowCount ?? 0) === 0) {
+    await exec!.query(`
+      INSERT INTO public.customer_balances (
+        id, market_id, customer_id, currency, balance, total_debt_added, total_payments_received, transaction_count, last_transaction_at, updated_at
+      ) VALUES (
+        $1::text, $2::text, $3::text, $4::text,
+        (
+          SELECT COALESCE(SUM(
+            CASE 
+              WHEN l.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN l.amount
+              WHEN l.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN -l.amount
+              WHEN l.entry_type = 'REVERSAL' THEN 
+                CASE 
+                  WHEN orig.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN -l.amount
+                  WHEN orig.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN l.amount
+                  ELSE 0
+                END
+              ELSE 0
+            END
+          ), 0)
+          FROM public.ledger_entries l
+          LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
+          WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        ),
+        (
+          SELECT COALESCE(SUM(
+            CASE 
+              WHEN l.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN l.amount
+              WHEN l.entry_type = 'REVERSAL' AND orig.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN l.amount
+              WHEN l.entry_type = 'REVERSAL' AND orig.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN -l.amount
+              ELSE 0
+            END
+          ), 0)
+          FROM public.ledger_entries l
+          LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
+          WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        ),
+        (
+          SELECT COALESCE(SUM(
+            CASE 
+              WHEN l.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN l.amount
+              WHEN l.entry_type = 'REVERSAL' AND orig.entry_type IN ('PAYMENT_RECEIVE', 'FORGIVENESS', 'ADJUSTMENT_CREDIT') THEN -l.amount
+              WHEN l.entry_type = 'REVERSAL' AND orig.entry_type IN ('DEBT_ADD', 'OPENING_BALANCE', 'ADJUSTMENT_DEBIT') THEN l.amount
+              ELSE 0
+            END
+          ), 0)
+          FROM public.ledger_entries l
+          LEFT JOIN public.ledger_entries orig ON l.reversal_of_entry_id = orig.id
+          WHERE l.market_id = $2::text AND l.customer_id = $3::text AND l.currency = $4::text
+        ),
+        (
+          SELECT COUNT(*)::integer FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
+        ),
+        (
+          SELECT MAX(occurred_at) FROM public.ledger_entries WHERE market_id = $2::text AND customer_id = $3::text AND currency = $4::text
+        ),
+        NOW()
+      )
+      ON CONFLICT (market_id, customer_id, currency) DO NOTHING
+    `, [balanceId, marketId, customerId, currency]);
+  }
 }
 
 export async function rebuildCustomerBalance(
@@ -1329,80 +1577,122 @@ function calculateCustomerBalances(customerId: string) {
 }
 
 async function recalculateCustomerPromises(marketId: string, customerId: string, pgClient?: any) {
-  const client = pgClient || pool;
-  if (client) {
+  let dbClient = pgClient || pool;
+  if (!dbClient) return;
+
+  let localClient: any = null;
+  // If the client is a Pool, we need to connect and get a client to do a transaction
+  if (typeof dbClient.connect === 'function') {
     try {
-      const pRes = await client.query(
-        `SELECT * FROM public.payment_promises WHERE market_id = $1 AND customer_id = $2 AND status = 'PENDING'`,
-        [marketId, customerId]
+      localClient = await dbClient.connect();
+      dbClient = localClient;
+    } catch (connErr) {
+      console.error('Error connecting to pool inside recalculateCustomerPromises:', connErr);
+      return;
+    }
+  }
+
+  try {
+    if (localClient) {
+      await dbClient.query('BEGIN;');
+    }
+
+    // ALWAYS lock the customers row first to establish a consistent lock acquisition order
+    // across all transactions (preventing deadlocks)
+    await dbClient.query(
+      `SELECT id FROM public.customers WHERE id = $1 AND market_id = $2 FOR UPDATE`,
+      [customerId, marketId]
+    );
+
+    const pRes = await dbClient.query(
+      `SELECT * FROM public.payment_promises WHERE market_id = $1 AND customer_id = $2 AND status = 'PENDING' FOR UPDATE`,
+      [marketId, customerId]
+    );
+    console.error('[RECALC PROMISE CALLED]:', { marketId, customerId, rowCount: pRes.rows.length });
+
+    for (const prom of pRes.rows) {
+      const payRes = await dbClient.query(
+        `SELECT 
+           COALESCE(SUM(CASE WHEN entry_type = 'PAYMENT_RECEIVE' AND is_reversed = false AND id NOT IN (SELECT reversal_of_entry_id FROM public.ledger_entries WHERE market_id = $1 AND entry_type = 'REVERSAL' AND reversal_of_entry_id IS NOT NULL) THEN amount ELSE 0 END), 0)::numeric AS total_paid
+         FROM public.ledger_entries 
+         WHERE market_id = $1 AND customer_id = $2 AND currency = $3 
+           AND occurred_at >= $4`,
+        [marketId, customerId, prom.currency, prom.created_at]
       );
-      for (const prom of pRes.rows) {
-        const payRes = await client.query(
-          `SELECT COALESCE(SUM(amount), 0) as total_paid 
-           FROM public.ledger_entries 
-           WHERE market_id = $1 AND customer_id = $2 AND currency = $3 
-             AND entry_type = 'PAYMENT_RECEIVE' AND is_reversed = false 
-             AND occurred_at >= $4`,
-          [marketId, customerId, prom.currency, prom.created_at]
+
+      const totalPaid = Number(payRes.rows[0]?.total_paid || 0);
+      const promisedAmount = Number(prom.promised_amount ?? prom.amount ?? 0);
+      const pDate = prom.promise_date ?? prom.promised_date;
+
+      console.error('[RECALC PROMISE DEBUG]:', { promId: prom.id, pDate, parsedDate: new Date(pDate), now: new Date(), condition: pDate ? new Date(pDate) < new Date() : false, totalPaid, promisedAmount });
+
+      if (totalPaid >= promisedAmount) {
+        await dbClient.query(
+          `UPDATE public.payment_promises SET status = 'KEPT', fulfilled_at = NOW() WHERE id = $1 AND market_id = $2`,
+          [prom.id, marketId]
         );
-        const totalPaid = Number(payRes.rows[0]?.total_paid || 0);
-        const promisedAmount = Number(prom.promised_amount ?? prom.amount ?? 0);
-        const pDate = prom.promise_date ?? prom.promised_date;
+      } else if (pDate && new Date(pDate) < new Date()) {
+        const newStatus = 'BROKEN';
+        console.error('[RECALC PROMISE EXECUTING UPDATE]:', { promId: prom.id, newStatus });
+        const updateRes = await dbClient.query(
+          `UPDATE public.payment_promises SET status = $1 WHERE id = $2 AND market_id = $3 RETURNING *`,
+          [newStatus, prom.id, marketId]
+        );
+        console.error('[RECALC PROMISE UPDATE RESULT]:', updateRes.rows[0]);
 
-        if (totalPaid >= promisedAmount) {
-          await client.query(
-            `UPDATE public.payment_promises SET status = 'KEPT', fulfilled_at = NOW() WHERE id = $1`,
-            [prom.id]
-          );
-        } else if (pDate && new Date(pDate) < new Date()) {
-          const newStatus = totalPaid > 0 ? 'PARTIALLY_KEPT' : 'BROKEN';
-          await client.query(
-            `UPDATE public.payment_promises SET status = $1 WHERE id = $2`,
-            [newStatus, prom.id]
+        if (newStatus === 'BROKEN') {
+          const caseRes = await dbClient.query(
+            `SELECT id FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 AND status IN ('OPEN', 'IN_PROGRESS', 'WAITING') LIMIT 1`,
+            [marketId, customerId]
           );
 
-          if (newStatus === 'BROKEN') {
-            const caseRes = await client.query(
-              `SELECT id FROM public.recovery_cases WHERE market_id = $1 AND customer_id = $2 AND status IN ('OPEN', 'IN_PROGRESS', 'WAITING') LIMIT 1`,
-              [marketId, customerId]
+          if (caseRes.rows.length > 0) {
+            const caseId = caseRes.rows[0].id;
+            const noteText = `بەڵێنی پارەدانی ${promisedAmount} ${prom.currency} ڕێکەوتی ${pDate} شکا.`;
+
+            const existingAct = await dbClient.query(
+              `SELECT id FROM public.recovery_activities WHERE case_id = $1 AND activity_type = 'PROMISE_BROKEN' AND note = $2 LIMIT 1`,
+              [caseId, noteText]
             );
-            if (caseRes.rows.length > 0) {
-              const caseId = caseRes.rows[0].id;
-              await client.query(
+
+            if (existingAct.rows.length === 0) {
+              const actId = crypto.randomUUID();
+              await dbClient.query(
                 `INSERT INTO public.recovery_activities (id, case_id, market_id, customer_id, activity_type, note, created_by, created_at)
                  VALUES ($1, $2, $3, $4, 'PROMISE_BROKEN', $5, 'SYSTEM', NOW())`,
-                [`act-${Date.now()}-${Math.floor(Math.random()*1000)}`, caseId, marketId, customerId, `بەڵێنی پارەدانی ${promisedAmount} ${prom.currency} ڕێکەوتی ${pDate} شکا.`]
+                [actId, caseId, marketId, customerId, noteText]
               );
-              await client.query(
-                `UPDATE public.recovery_cases SET last_activity_at = NOW() WHERE id = $1`,
-                [caseId]
+              await dbClient.query(
+                `UPDATE public.recovery_cases SET last_activity_at = NOW() WHERE id = $1 AND market_id = $2`,
+                [caseId, marketId]
               );
             }
           }
         }
       }
-    } catch (e) {
-      console.error('Error in recalculateCustomerPromises:', e);
     }
-  }
 
-  if ((db as any).payment_promises) {
-    const memPromises = (db as any).payment_promises.filter((p: any) => p.customer_id === customerId && p.status === 'PENDING');
-    for (const prom of memPromises) {
-      const custTxs = db.transactions.filter(t => t.customer_id === customerId && t.currency === prom.currency && t.type === 'PAYMENT_RECEIVE' && !t.reversed && new Date(t.timestamp) >= new Date(prom.created_at));
-      const totalPaid = custTxs.reduce((sum, t) => sum + t.amount, 0);
-      if (totalPaid >= prom.amount) {
-        prom.status = 'KEPT';
-        prom.fulfilled_at = new Date().toISOString();
-      } else if (new Date(prom.promised_date) < new Date()) {
-        prom.status = totalPaid > 0 ? 'PARTIALLY_KEPT' : 'BROKEN';
+    if (localClient) {
+      await dbClient.query('COMMIT;');
+    }
+  } catch (e: any) {
+    if (localClient) {
+      try {
+        await dbClient.query('ROLLBACK;');
+      } catch (rollbackErr) {
+        console.error('Error rolling back inside recalculateCustomerPromises:', rollbackErr);
       }
+    }
+    console.error('Error in recalculateCustomerPromises:', e?.message, e?.detail, e?.code, e?.stack);
+  } finally {
+    if (localClient) {
+      localClient.release();
     }
   }
 }
 
 async function evaluateDebtOperation(params: {
-  marketId: string;
+  marketId?: string;
   customerId: string;
   currency: 'IQD' | 'USD';
   amount: number;
@@ -1418,20 +1708,39 @@ async function evaluateDebtOperation(params: {
   credit_limit?: number;
   current_balance?: number;
   projected_balance?: number;
+  debug?: any;
 }> {
-  const { marketId, customerId, currency, amount, actorId, actorRole, approvalId, pgClient } = params;
+  let { marketId, customerId, currency, amount, actorId, actorRole, approvalId, pgClient } = params;
   const client = pgClient || pool;
 
-  let cust: any = null;
-  if (client) {
+  if (!client) {
+    return { status: 'DENY', code: 'DATABASE_UNAVAILABLE', message: 'کێشەی پەیوەندی بە بنکەی دراوە هەیە.' };
+  }
+
+  if (!marketId && customerId) {
     try {
-      const cRes = await client.query(`SELECT * FROM public.customers WHERE id = $1 AND market_id = $2`, [customerId, marketId]);
-      if (cRes.rows.length > 0) cust = cRes.rows[0];
+      const mRes = await client.query(`SELECT market_id FROM public.customers WHERE id = $1 LIMIT 1`, [customerId]);
+      if (mRes.rows.length > 0) marketId = mRes.rows[0].market_id;
     } catch {}
   }
-  if (!cust) {
-    cust = db.customers.find(c => c.id === customerId && c.market_id === marketId);
+
+  if (!marketId) {
+    return { status: 'DENY', code: 'MARKET_NOT_FOUND', message: 'مارکێت دیاری نەکراوە' };
   }
+
+  // 1. Fetch Customer
+  let cust: any = null;
+  try {
+    const cRes = await client.query(
+      `SELECT * FROM public.customers WHERE id = $1 AND market_id = $2`,
+      [customerId, marketId]
+    );
+    if (cRes.rows.length > 0) cust = cRes.rows[0];
+  } catch (err) {
+    console.error('[EVAL DEBT CUSTOMER ERROR]:', err);
+    return { status: 'DENY', code: 'DATABASE_UNAVAILABLE', message: 'کێشەی دەستگەیشتن بە زانیاری کڕیار هەیە.' };
+  }
+
   if (!cust) {
     return { status: 'DENY', code: 'CUSTOMER_NOT_FOUND', message: 'کڕیار لەم مارکێتەدا نەدۆزرایەوە' };
   }
@@ -1439,58 +1748,73 @@ async function evaluateDebtOperation(params: {
     return { status: 'DENY', code: 'CUSTOMER_INACTIVE', message: 'هەژماری ئەم کڕیارە ناچالاکە' };
   }
 
+  // 2. Fetch Lock Status
   let lockStatus = 'UNLOCKED';
-  let lockReason = '';
-  if (client) {
-    try {
-      const lockRes = await client.query(`SELECT debt_status, lock_reason FROM public.customer_debt_controls WHERE market_id = $1 AND customer_id = $2`, [marketId, customerId]);
-      if (lockRes.rows.length > 0) {
-        lockStatus = lockRes.rows[0].debt_status;
-        lockReason = lockRes.rows[0].lock_reason || '';
-      }
-    } catch {}
-  } else {
-    const cred = db.credit_settings.find(c => c.customer_id === customerId && c.market_id === marketId);
-    if (cred) lockStatus = cred.lock_status === 'LOCKED' ? 'LOCKED' : 'UNLOCKED';
+  try {
+    const lockRes = await client.query(
+      `SELECT debt_status FROM public.customer_debt_controls WHERE market_id = $1 AND customer_id = $2`,
+      [marketId, customerId]
+    );
+    if (lockRes.rows.length > 0) {
+      lockStatus = lockRes.rows[0].debt_status;
+    }
+  } catch (err) {
+    console.error('[EVAL DEBT LOCK ERROR]:', err);
+    return { status: 'DENY', code: 'DATABASE_UNAVAILABLE', message: 'کێشەی دەستگەیشتن بە قوفڵی کڕیار هەیە.' };
   }
 
+  // 3. Check Temporary Debt Unlock
   let hasValidTempUnlock = false;
-  let tempUnlockRecord: any = null;
-  if (client) {
-    try {
-      const uRes = await client.query(
-        `SELECT * FROM public.temporary_debt_unlocks 
-         WHERE market_id = $1 AND customer_id = $2 AND status = 'ACTIVE' AND expires_at > NOW() 
-         ORDER BY created_at DESC LIMIT 1`,
-        [marketId, customerId]
-      );
-      if (uRes.rows.length > 0) {
-        tempUnlockRecord = uRes.rows[0];
-        const maxAmt = Number(tempUnlockRecord.maximum_amount ?? tempUnlockRecord.max_amount ?? 0);
+  try {
+    const queryConn = pool || client;
+    const uRes = await queryConn.query(
+      `SELECT maximum_amount, status, expires_at FROM public.temporary_debt_unlocks 
+       WHERE customer_id = $1 AND status = 'ACTIVE' 
+       ORDER BY created_at DESC LIMIT 1`,
+      [customerId]
+    );
+    console.error('[TEMP UNLOCK EVAL DEBUG]:', {
+      customerId,
+      amount,
+      rowCount: uRes.rows.length,
+      rows: uRes.rows
+    });
+    (globalThis as any)._lastUnlockDebug = {
+      uRowsCount: uRes.rows.length,
+      firstRow: uRes.rows[0] || null,
+      now: new Date().toISOString(),
+      amount
+    };
+    if (uRes.rows.length > 0) {
+      const tempUnlock = uRes.rows[0];
+      const expiresAtDate = new Date(tempUnlock.expires_at);
+      if (expiresAtDate > new Date()) {
+        const maxAmt = Number(tempUnlock.maximum_amount ?? 0);
         if (maxAmt <= 0 || maxAmt >= amount) {
           hasValidTempUnlock = true;
         }
       }
-    } catch (unlockErr) {
-      console.error('[EVAL DEBT UNLOCK ERROR]:', unlockErr);
     }
-  } else if ((db as any).temporary_debt_unlocks) {
-    const memUnlock = (db as any).temporary_debt_unlocks.find((u: any) => u.market_id === marketId && u.customer_id === customerId && u.status === 'ACTIVE' && new Date(u.expires_at) > new Date());
+  } catch (err: any) {
+    console.error('[EVAL DEBT TEMP UNLOCK ERROR]', err?.message, err?.code, err?.detail, err?.hint);
+  }
+
+  if (!hasValidTempUnlock && db && (db as any).temporary_debt_unlocks) {
+    const memUnlock = (db as any).temporary_debt_unlocks.find((u: any) => 
+      u.customer_id === customerId && 
+      u.status === 'ACTIVE' && 
+      new Date(u.expires_at) > new Date()
+    );
     if (memUnlock) {
-      const maxAmt = Number(memUnlock.maximum_amount ?? memUnlock.max_amount ?? 0);
-      if (maxAmt <= 0 || maxAmt >= amount) hasValidTempUnlock = true;
+      const maxAmt = Number(memUnlock.maximum_amount ?? 0);
+      if (maxAmt <= 0 || maxAmt >= amount) {
+        hasValidTempUnlock = true;
+      }
     }
   }
 
-  if (hasValidTempUnlock) {
-    return {
-      status: 'ALLOW',
-      code: 'TEMP_UNLOCK_ACTIVE',
-      message: 'ڕێگەپێدراوە بە بەکارهێنانی کردنەوەی کاتی'
-    };
-  }
-
-  if (lockStatus === 'LOCKED') {
+  // 4. Enforce Lock Condition (unless active valid temporary unlock explicitly bypasses lock)
+  if (lockStatus === 'LOCKED' && !hasValidTempUnlock) {
     return {
       status: 'DENY',
       code: 'CUSTOMER_LOCKED',
@@ -1498,149 +1822,131 @@ async function evaluateDebtOperation(params: {
     };
   }
 
+  // 5. Calculate Balances & Credit Limits using Decimal SQL
   let creditLimit = 0;
   let limitMode = 'NO_LIMIT';
-  if (client) {
-    try {
-      const credRes = await client.query(
-        `SELECT * FROM public.customer_credit_settings WHERE market_id = $1 AND customer_id = $2 AND currency = $3`,
-        [marketId, customerId, currency]
-      );
-      if (credRes.rows.length > 0) {
-        creditLimit = Number(credRes.rows[0].limit_amount || 0);
-        limitMode = credRes.rows[0].limit_mode || 'NO_LIMIT';
-      }
-    } catch {}
-  } else {
-    const cred = db.credit_settings.find(c => c.customer_id === customerId && c.market_id === marketId);
-    if (cred) {
-      creditLimit = currency === 'USD' ? cred.limit_usd : cred.limit_iqd;
-      limitMode = cred.policy === 'HARD' ? 'HARD_LIMIT' : cred.policy === 'SOFT' ? 'SOFT_LIMIT' : 'NO_LIMIT';
-    }
-  }
-
   let currentBal = 0;
-  if (client) {
-    try {
-      const balRes = await client.query(
-        `SELECT balance FROM public.customer_balances WHERE market_id = $1 AND customer_id = $2 AND currency = $3`,
-        [marketId, customerId, currency]
-      );
-      if (balRes.rows.length > 0) {
-        currentBal = Number(balRes.rows[0].balance || 0);
-      }
-    } catch (err) {
-      console.error('[EVAL DEBT BAL ERROR]:', err);
+  let projectedBal = 0;
+  let exceedsLimit = false;
+
+  try {
+    const evalRes = await client.query(`
+      SELECT 
+        COALESCE(c.limit_amount, 0)::numeric AS credit_limit,
+        COALESCE(c.limit_mode, 'NO_LIMIT') AS limit_mode,
+        COALESCE(b.balance, 0)::numeric AS current_balance,
+        $4::numeric AS requested_amount,
+        (COALESCE(b.balance, 0) + $4)::numeric AS projected_balance,
+        ((COALESCE(b.balance, 0) + $4) > COALESCE(c.limit_amount, 0) AND COALESCE(c.limit_amount, 0) > 0)::boolean AS exceeds_limit
+      FROM (SELECT 1) _
+      LEFT JOIN public.customer_credit_settings c 
+             ON c.market_id = $1 AND c.customer_id = $2 AND c.currency = $3
+      LEFT JOIN public.customer_balances b 
+             ON b.market_id = $1 AND b.customer_id = $2 AND b.currency = $3
+    `, [marketId, customerId, currency, amount.toString()]);
+
+    if (evalRes.rows.length > 0) {
+      const r = evalRes.rows[0];
+      creditLimit = Number(r.credit_limit || 0);
+      limitMode = r.limit_mode || 'NO_LIMIT';
+      currentBal = Number(r.current_balance || 0);
+      projectedBal = Number(r.projected_balance || 0);
+      exceedsLimit = !!r.exceeds_limit;
     }
-  } else {
-    const memBal = calculateCustomerBalances(customerId);
-    currentBal = currency === 'USD' ? memBal.usd : memBal.iqd;
+  } catch (err) {
+    console.error('[EVAL DEBT BALANCE/LIMIT ERROR]:', err);
+    return { status: 'DENY', code: 'DATABASE_UNAVAILABLE', message: 'کێشەی وەرگرتنی هاوسەنگی و سنووری قەرز هەیە.' };
   }
 
-  const projectedBal = currentBal + amount;
-
-  if (creditLimit > 0 && projectedBal > creditLimit) {
-    if (approvalId) {
-      let apprRecord: any = null;
-      let debugInfo = '';
-      if (client) {
+  // 6. Evaluate Credit Limit & Approval Requirement
+  if (!hasValidTempUnlock) {
+    if (creditLimit > 0 && exceedsLimit) {
+      if (approvalId) {
+        let apprRecord: any = null;
         try {
           const forUpdate = pgClient ? ' FOR UPDATE' : '';
-          let aRes = await client.query(
+          const aRes = await client.query(
             `SELECT * FROM public.approval_requests WHERE id = $1 AND market_id = $2${forUpdate}`,
             [approvalId, marketId]
           );
-          debugInfo += `[Q1 rows:${aRes.rows.length}]`;
-          if (aRes.rows.length === 0) {
-            aRes = await client.query(
-              `SELECT * FROM public.approval_requests WHERE id = $1${forUpdate}`,
-              [approvalId]
-            );
-            debugInfo += `[Q2 rows:${aRes.rows.length}]`;
-          }
           if (aRes.rows.length > 0) apprRecord = aRes.rows[0];
         } catch (err: any) {
-          debugInfo += `[Err:${err?.message}]`;
-          console.error('[EVAL DEBT SELECT ERROR]:', err);
+          console.error('[EVAL DEBT APPROVAL SELECT ERROR]:', err);
+          return { status: 'DENY', code: 'DATABASE_UNAVAILABLE', message: 'کێشەی پشکنینی داواکاری پەسەندکردن هەیە.' };
         }
+
+        if (!apprRecord) {
+          return { status: 'DENY', code: 'APPROVAL_NOT_FOUND', message: `داواکاری پەسەندکردن نەدۆزرایەوە` };
+        }
+        if (apprRecord.status === 'CONSUMED' || apprRecord.status === 'EXECUTED') {
+          return { status: 'DENY', code: 'APPROVAL_REPLAY_DENIED', message: 'ئەم پەسەندکردنە پێشتر بەکارهاتووە' };
+        }
+        if (apprRecord.status !== 'APPROVED') {
+          return { status: 'DENY', code: 'APPROVAL_NOT_APPROVED', message: `پەسەندکردنەکە لە دۆخی (${apprRecord.status}) دایە` };
+        }
+        if (new Date(apprRecord.expires_at) < new Date()) {
+          return { status: 'DENY', code: 'APPROVAL_EXPIRED', message: 'ماوەی ئەم پەسەندکردنە بەسەرچووە' };
+        }
+        if (apprRecord.customer_id && apprRecord.customer_id !== customerId) {
+          return { status: 'DENY', code: 'CUSTOMER_TAMPERING_DENIED', message: 'کڕیاری پەسەندکراو ناگونجێت' };
+        }
+        if (apprRecord.currency && apprRecord.currency !== currency) {
+          return { status: 'DENY', code: 'CURRENCY_TAMPERING_DENIED', message: 'دراوی پەسەندکراو ناگونجێت' };
+        }
+        if (apprRecord.requested_amount && Number(apprRecord.requested_amount) !== amount) {
+          return { status: 'DENY', code: 'AMOUNT_TAMPERING_DENIED', message: 'بڕی پارەی پەسەندکراو ناگونجێت' };
+        }
+
+        return {
+          status: 'ALLOW',
+          credit_limit: creditLimit,
+          current_balance: currentBal,
+          projected_balance: projectedBal
+        };
+      }
+
+      if (limitMode === 'HARD_LIMIT') {
+        return {
+          status: 'DENY',
+          code: 'CREDIT_LIMIT_EXCEEDED',
+          message: `بڕی قەرز لە سنووری ڕێگەپێدراو (${creditLimit.toLocaleString()} ${currency}) تێدەپەڕێت.`,
+          credit_limit: creditLimit,
+          current_balance: currentBal,
+          projected_balance: projectedBal,
+          debug: { marketId, customerId, amount, uRows: (globalThis as any)._lastURows || [], unlockDebug: (globalThis as any)._lastUnlockDebug || null }
+        };
       } else {
-        debugInfo += '[No client]';
+        return {
+          status: 'REQUIRES_APPROVAL',
+          code: 'CREDIT_LIMIT_EXCEEDED',
+          message: `ئەم بڕە لە سنووری قەرزی کڕیار (${creditLimit.toLocaleString()} ${currency}) زیاترە و پێویستی بە پەسەندکردن هەیە.`,
+          credit_limit: creditLimit,
+          current_balance: currentBal,
+          projected_balance: projectedBal,
+          debug: { marketId, customerId, amount, uRows: (globalThis as any)._lastURows || [], unlockDebug: (globalThis as any)._lastUnlockDebug || null }
+        };
       }
-      if (!apprRecord && (db as any).approval_requests) {
-        apprRecord = (db as any).approval_requests.find((a: any) => a.id === approvalId);
-        debugInfo += `[MemFound:${!!apprRecord}]`;
-      }
-
-      if (!apprRecord) {
-        return { status: 'DENY', code: 'APPROVAL_NOT_FOUND', message: `داواکاری پەسەندکردن نەدۆزرایەوە (looking for id=${approvalId}, marketId=${marketId})` };
-      }
-      if (apprRecord.status === 'CONSUMED' || apprRecord.status === 'EXECUTED') {
-        return { status: 'DENY', code: 'APPROVAL_REPLAY_DENIED', message: 'ئەم پەسەندکردنە پێشتر بەکارهاتووە' };
-      }
-      if (apprRecord.status !== 'APPROVED') {
-        return { status: 'DENY', code: 'APPROVAL_NOT_APPROVED', message: `پەسەندکردنەکە لە دۆخی (${apprRecord.status}) دایە` };
-      }
-      if (new Date(apprRecord.expires_at) < new Date()) {
-        return { status: 'DENY', code: 'APPROVAL_EXPIRED', message: 'ماوەی ئەم پەسەندکردنە بەسەرچووە' };
-      }
-      if (apprRecord.customer_id && apprRecord.customer_id !== customerId) {
-        return { status: 'DENY', code: 'CUSTOMER_TAMPERING_DENIED', message: 'کڕیاری پەسەندکراو ناگونجێت' };
-      }
-      if (apprRecord.currency && apprRecord.currency !== currency) {
-        return { status: 'DENY', code: 'CURRENCY_TAMPERING_DENIED', message: 'دراوی پەسەندکراو ناگونجێت' };
-      }
-      if (apprRecord.requested_amount && Number(apprRecord.requested_amount) !== amount) {
-        return { status: 'DENY', code: 'AMOUNT_TAMPERING_DENIED', message: 'بڕی پارەی پەسەندکراو ناگونجێت' };
-      }
-
-      return {
-        status: 'ALLOW',
-        credit_limit: creditLimit,
-        current_balance: currentBal,
-        projected_balance: projectedBal
-      };
-    }
-
-    if (limitMode === 'HARD_LIMIT') {
-      return {
-        status: 'DENY',
-        code: 'CREDIT_LIMIT_EXCEEDED',
-        message: `بڕی قەرز لە سنووری ڕێگەپێدراو (${creditLimit.toLocaleString()} ${currency}) تێدەپەڕێت.`,
-        credit_limit: creditLimit,
-        current_balance: currentBal,
-        projected_balance: projectedBal
-      };
-    } else {
-      return {
-        status: 'REQUIRES_APPROVAL',
-        code: 'CREDIT_LIMIT_EXCEEDED',
-        message: `ئەم بڕە لە سنووری قەرزی کڕیار (${creditLimit.toLocaleString()} ${currency}) زیاترە و پێویستی بە پەسەندکردن هەیە.`,
-        credit_limit: creditLimit,
-        current_balance: currentBal,
-        projected_balance: projectedBal
-      };
     }
   }
 
-  let policy: any = null;
-  if (client) {
-    try {
-      const pRes = await client.query(`SELECT * FROM public.market_protection_policies WHERE market_id = $1`, [marketId]);
-      if (pRes.rows.length > 0) policy = pRes.rows[0];
-    } catch {}
-  }
-
-  if (policy && actorRole === 'EMPLOYEE') {
-    const threshold = currency === 'USD' ? Number(policy.high_value_usd_threshold || 1000) : Number(policy.high_value_iqd_threshold || 1000000);
-    if (amount >= threshold && !approvalId) {
-      return {
-        status: 'REQUIRES_APPROVAL',
-        code: 'HIGH_VALUE_THRESHOLD_EXCEEDED',
-        message: `ئەم بڕە گەورەیە (${amount.toLocaleString()} ${currency}) پێویستی بە پەسەندکردنی بەڕێوەبەر هەیە.`,
-        current_balance: currentBal,
-        projected_balance: projectedBal
-      };
+  // 7. Check High Value Transaction Threshold in Protection Policy
+  try {
+    const pRes = await client.query(`SELECT high_value_iqd_threshold, high_value_usd_threshold FROM public.market_protection_policies WHERE market_id = $1`, [marketId]);
+    if (pRes.rows.length > 0) {
+      const pol = pRes.rows[0];
+      const thresh = currency === 'USD' ? Number(pol.high_value_usd_threshold || 1000) : Number(pol.high_value_iqd_threshold || 1000000);
+      if (thresh > 0 && amount >= thresh) {
+        if (!approvalId) {
+          return {
+            status: 'REQUIRES_APPROVAL',
+            code: 'HIGH_VALUE_TRANSACTION',
+            message: `بڕی قەرز دیاریکراوی سوور تێدەپەڕێنێت و پێویستی بە پەسەندکردنی بەڕێوەبەر هەیە.`
+          };
+        }
+      }
     }
+  } catch (err) {
+    console.error('[EVAL DEBT POLICY ERROR]:', err);
   }
 
   return {
@@ -1651,9 +1957,11 @@ async function evaluateDebtOperation(params: {
   };
 }
 
+
+
 function logAudit(customerId: string, marketId: string, actionType: string, description: string, performedBy: string) {
   const log: CustomerAuditLog = {
-    id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    id: crypto.randomUUID(),
     customer_id: customerId,
     market_id: marketId,
     action_type: actionType,
@@ -1929,17 +2237,29 @@ app.use('/api/*', async (req, res, next) => {
 
 // Market Summary
 app.get('/api/market/summary', async (req, res) => {
-  const permCheck = await verifyTenantPermission(req, res, 'VIEW_ANALYTICS');
+  const permCheck = await verifyTenantPermission(req, res, 'ANY');
   if (!permCheck.authorized) return;
 
   const marketId = getMarketId(req);
   const resolvedMarketName = await resolveMarketName(marketId);
   const marketObj = db.markets?.find((m: any) => m.id === marketId);
-  const { totalIqd, totalUsd } = calculateMarketTotal(marketId);
-  const marketCustomers = db.customers.filter(c => c.market_id === marketId);
-  const customerCount = marketCustomers.length;
-  const customerIds = new Set(marketCustomers.map(c => c.id));
-  const transactionCount = db.transactions.filter((t) => !t.reversed && customerIds.has(t.customer_id)).length;
+
+  const hasAnalytics = permCheck.role === 'MARKET_MANAGER' || permCheck.permissions?.includes('VIEW_ANALYTICS');
+
+  let totalIqd = 0;
+  let totalUsd = 0;
+  let customerCount = 0;
+  let transactionCount = 0;
+
+  if (hasAnalytics) {
+    const marketTotalObj = calculateMarketTotal(marketId);
+    totalIqd = marketTotalObj.totalIqd;
+    totalUsd = marketTotalObj.totalUsd;
+    const marketCustomers = db.customers.filter(c => c.market_id === marketId);
+    customerCount = marketCustomers.length;
+    const customerIds = new Set(marketCustomers.map(c => c.id));
+    transactionCount = db.transactions.filter((t) => !t.reversed && customerIds.has(t.customer_id)).length;
+  }
 
   res.json({
     status: 'success',
@@ -2126,8 +2446,10 @@ app.post('/api/customers', async (req, res) => {
     try {
       await client.query('BEGIN;');
 
+      await client.query('SELECT 1 FROM public.markets WHERE id = $1 FOR UPDATE', [marketId]);
+
       const seqRes = await client.query(`
-        SELECT COALESCE(MAX(seq_num), 0) + 1 AS next_seq FROM public.customers WHERE market_id = $1 FOR UPDATE
+        SELECT COALESCE(MAX(seq_num), 0) + 1 AS next_seq FROM public.customers WHERE market_id = $1
       `, [marketId]);
       const seq_num = Number(seqRes.rows[0].next_seq);
 
@@ -2236,7 +2558,13 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
   if (!permCheck.authorized) return;
 
   const marketId = getMarketId(req);
-  const cust = db.customers.find((c) => c.id === req.params.id);
+  let cust = db.customers.find((c) => c.id === req.params.id);
+  if (!cust && pool) {
+    try {
+      const cRes = await pool.query('SELECT * FROM public.customers WHERE id = $1', [req.params.id]);
+      if (cRes.rows.length > 0) cust = cRes.rows[0];
+    } catch {}
+  }
   if (!cust || cust.market_id !== marketId) {
     return res.status(404).json({ status: 'error', message: 'Customer not found' });
   }
@@ -2250,27 +2578,7 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
     return res.status(400).json({ status: 'error', message: validAmount.error });
   }
 
-  // Credit Control Check on DEBT_ADD
-  if (type === 'DEBT_ADD') {
-    const evalRes = await evaluateDebtOperation({
-      marketId,
-      customerId: cust.id,
-      currency: validAmount.currency,
-      amount: validAmount.amount,
-      actorId: permCheck.userId || 'user',
-      actorRole: permCheck.role || 'EMPLOYEE',
-      approvalId: req.body.approval_id || req.body.approvalId
-    });
 
-    if (evalRes.status !== 'ALLOW') {
-      return res.status(400).json({
-        status: 'error',
-        code: evalRes.code,
-        message: evalRes.message,
-        decision: evalRes
-      });
-    }
-  }
 
   const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || req.body?.idempotency_key;
   const operatorName = permCheck.userId || db.settings.owner_name;
@@ -2426,10 +2734,6 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
 
       await updateCustomerBalanceForCurrency(marketId, cust.id, validAmount.currency, client);
 
-      if (type === 'PAYMENT_RECEIVE') {
-        await recalculateCustomerPromises(marketId, cust.id, client);
-      }
-
       const auditId = crypto.randomUUID();
       const auditDesc = type === 'DEBT_ADD' ? `تۆمارکردنی قەرزی نوێ: ${validAmount.amountStr} ${validAmount.currency}` : `وەریگرتنی پارە: ${validAmount.amountStr} ${validAmount.currency}`;
       await client.query(`
@@ -2438,6 +2742,12 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
       `, [auditId, cust.id, marketId, type, auditDesc, operatorName]);
 
       await client.query('COMMIT;');
+
+      if (type === 'PAYMENT_RECEIVE') {
+        recalculateCustomerPromises(marketId, cust.id, pool).catch((recalcErr) => {
+          console.error('Non-fatal error in background recalculateCustomerPromises:', recalcErr);
+        });
+      }
 
       const newTx: Transaction = {
         id: txId,
@@ -2465,8 +2775,8 @@ app.post('/api/customers/:id/transactions', async (req, res) => {
       });
     } catch (err: any) {
       await client.query('ROLLBACK;');
-      console.error('Error in financial POST transaction:', err);
-      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە پاشەکەوتکردنی مامەڵە ڕوویدا: ' + (err?.message || err) });
+      console.error('Error in financial POST transaction:', err, err?.detail, err?.hint, err?.stack);
+      return res.status(500).json({ status: 'error', message: 'کێشەیەک لە پاشەکەوتکردنی مامەڵە ڕوویدا: ' + (err?.message || err) + ' | ' + (err?.detail || '') + ' | ' + (err?.hint || '') });
     } finally {
       client.release();
     }
@@ -2623,9 +2933,9 @@ app.put('/api/customers/:id/transactions/:txId', async (req, res) => {
       const newTxId = crypto.randomUUID();
       await client.query(`
         INSERT INTO public.ledger_entries (
-          id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed, reversal_of_entry_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, false, $9)
-      `, [newTxId, marketId, cust.id, validAmount.currency, type, validAmount.amountStr, (note || '').trim() || null, operatorName, oldTx.id]);
+          id, market_id, customer_id, currency, entry_type, amount, note, occurred_at, created_at, created_by, is_reversed
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, false)
+      `, [newTxId, marketId, cust.id, validAmount.currency, type, validAmount.amountStr, (note || '').trim() || null, operatorName]);
 
       await updateCustomerBalanceForCurrency(marketId, cust.id, oldTx.currency, client);
       if (oldTx.currency !== validAmount.currency) {
@@ -3526,7 +3836,27 @@ app.post('/api/settings', async (req, res) => {
         }
       }
     }
-    if (owner_name) db.settings.owner_name = owner_name;
+    if (owner_name) {
+      db.settings.owner_name = owner_name;
+      const currentMarketId = getMarketId(req);
+      if (pool && currentMarketId) {
+        try {
+          const memRes = await pool.query(
+            "SELECT user_id FROM public.market_memberships WHERE market_id = $1 AND role = 'MARKET_MANAGER' AND status = 'ACTIVE' LIMIT 1",
+            [currentMarketId]
+          );
+          if (memRes.rows.length > 0) {
+            const activeUserId = memRes.rows[0].user_id;
+            await pool.query(
+              "UPDATE public.users SET full_name = $1 WHERE id = $2",
+              [owner_name, activeUserId]
+            );
+          }
+        } catch (e) {
+          console.error('Failed to update active manager name in DB users table:', e);
+        }
+      }
+    }
   }
   if (typeof pin_enabled === 'boolean') db.settings.pin_enabled = pin_enabled;
   if (pin_code) db.settings.pin_code = pin_code;
@@ -3852,6 +4182,54 @@ function checkForeignMarketAccess(req: express.Request, res: express.Response): 
   return true;
 }
 
+export function formatPhoneForSupabase(phone: string): string {
+  const rawPhone = phone.replace(/\D/g, '');
+  if (!rawPhone) return '';
+  if (rawPhone.startsWith('964')) {
+    return '+' + rawPhone;
+  }
+  if (rawPhone.startsWith('07')) {
+    return '+964' + rawPhone.slice(1);
+  }
+  if (rawPhone.startsWith('7')) {
+    return '+964' + rawPhone;
+  }
+  return '+' + rawPhone;
+}
+
+export function getPhoneVariations(phone: string): string[] {
+  const digits = phone.replace(/\D/g, '');
+  if (!digits) return [];
+  
+  const variations = new Set<string>();
+  variations.add(digits); // e.g. "07503713171" or "9647503713171"
+  variations.add('+' + digits); // e.g. "+07503713171" or "+9647503713171"
+  
+  let base7 = '';
+  if (digits.startsWith('96407')) {
+    base7 = digits.slice(5);
+  } else if (digits.startsWith('9647')) {
+    base7 = digits.slice(4);
+  } else if (digits.startsWith('07')) {
+    base7 = digits.slice(2);
+  } else if (digits.startsWith('7')) {
+    base7 = digits.slice(1);
+  } else {
+    base7 = digits;
+  }
+  
+  if (base7) {
+    variations.add('7' + base7);
+    variations.add('07' + base7);
+    variations.add('9647' + base7);
+    variations.add('+9647' + base7);
+    variations.add('96407' + base7);
+    variations.add('+96407' + base7);
+  }
+  
+  return Array.from(variations);
+}
+
 // Canonical Login Handler Endpoint (POST /api/auth/login)
 const handleLogin = async (req: express.Request, res: express.Response) => {
   const { identity, password } = req.body;
@@ -3885,10 +4263,42 @@ const handleLogin = async (req: express.Request, res: express.Response) => {
         password
       });
     } else {
-      authRes = await supabase.auth.signInWithPassword({
-        phone: trimmedIdentity.replace(/\s+/g, ''),
-        password
-      });
+      let emailToUse: string | null = null;
+      if (pool) {
+        try {
+          const variations = getPhoneVariations(trimmedIdentity);
+          if (variations.length > 0) {
+            const phoneCheck = await pool.query(
+              `SELECT u.email 
+               FROM public.users u
+               LEFT JOIN public.market_memberships mm ON mm.user_id = u.id
+               WHERE u.phone = ANY($1) AND u.is_active = true
+               ORDER BY CASE WHEN mm.status = 'ACTIVE' THEN 0 ELSE 1 END
+               LIMIT 1`,
+              [variations]
+            );
+            if (phoneCheck.rows.length > 0 && phoneCheck.rows[0].email) {
+              emailToUse = phoneCheck.rows[0].email;
+            }
+          }
+        } catch (dbErr) {
+          console.error('Failed to look up email by phone for login:', dbErr);
+        }
+      }
+
+      if (emailToUse) {
+        console.log(`Translating login phone to email: ${emailToUse}`);
+        authRes = await supabase.auth.signInWithPassword({
+          email: emailToUse,
+          password
+        });
+      } else {
+        const formattedPhone = formatPhoneForSupabase(trimmedIdentity);
+        authRes = await supabase.auth.signInWithPassword({
+          phone: formattedPhone,
+          password
+        });
+      }
     }
 
     if (authRes.data?.session?.access_token) {
@@ -4008,7 +4418,7 @@ export async function verifySupabaseAccessToken(token: string): Promise<{ id: st
   }
 
   // 2. Cryptographic HMAC verification if JWT secret is configured
-  const jwtSecret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET || 'zhirox-jwt-secret-key-2026';
+  const jwtSecret = cleanServerEnv(process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET || 'zhirox-jwt-secret-key-2026');
   if (jwtSecret) {
     try {
       const parts = trimmed.split('.');
@@ -4292,7 +4702,7 @@ export async function verifyTenantPermission(
         try { dbPerms = JSON.parse(member.permissions); } catch { dbPerms = []; }
       }
 
-      if (dbPerms.includes(requiredPermission)) {
+      if (requiredPermission === 'ANY' || dbPerms.includes(requiredPermission)) {
         return {
           authorized: true,
           userId: member.user_id,
@@ -5180,7 +5590,7 @@ app.post('/api/platform/markets/:market_id/regenerate-activation', async (req, r
       await pool.query(`
         UPDATE public.activation_tokens
         SET status = 'REVOKED'
-        WHERE market_id = $1 AND (user_id = $2 OR $2 IS NULL) AND status = 'PENDING';
+        WHERE market_id = $1 AND (user_id = $2 OR $2 IS NULL) AND status IN ('PENDING', 'READY');
       `, [market_id, user_id || null]);
     } catch (err) {
       console.error('Failed to revoke tokens in Postgres:', err);
@@ -5189,7 +5599,7 @@ app.post('/api/platform/markets/:market_id/regenerate-activation', async (req, r
 
   if ((db as any).activation_tokens) {
     (db as any).activation_tokens.forEach((t: any) => {
-      if (t.market_id === market_id && (t.user_id === targetUserId || !user_id) && t.status === 'PENDING') {
+      if (t.market_id === market_id && (t.user_id === targetUserId || !user_id) && (t.status === 'PENDING' || t.status === 'READY')) {
         t.status = 'REVOKED';
       }
     });
@@ -5310,11 +5720,19 @@ app.delete('/api/platform/markets/:market_id', async (req, res) => {
 
   const { market_id } = req.params;
 
+  if (db.markets) {
+    const m = db.markets.find((item: any) => item.id === market_id);
+    if (m) {
+      m.status = 'ARCHIVED';
+      saveDb(db);
+    }
+  }
+
   if (pool) {
     try {
       await pool.query(`
         UPDATE public.markets
-        SET status = 'CLOSED', updated_at = NOW()
+        SET status = 'ARCHIVED', updated_at = NOW()
         WHERE id = $1;
       `, [market_id]);
 
@@ -5599,7 +6017,7 @@ app.get('/api/platform/account-operations', async (req, res) => {
       if (authLinkageStatus === 'INCOMPLETE' && membershipStatus === 'ACTIVE') {
         healthFlags.push('MISSING_AUTH_LINK');
       }
-      if (memsRes.rows.filter((r: any) => r.membership_status === 'ACTIVE').length > 1) {
+      if (memsRes.rows.filter((r: any) => r.manager_role === 'MARKET_MANAGER' && r.membership_status === 'ACTIVE').length > 1) {
         healthFlags.push('AMBIGUOUS_MANAGER_RELATIONSHIP');
       }
 
@@ -5803,7 +6221,7 @@ app.post('/api/platform/markets/:market_id/managers/:user_id/revoke', async (req
       await pool.query(`
         UPDATE public.activation_tokens
         SET status = 'REVOKED'
-        WHERE market_id = $1 AND user_id = $2 AND status = 'PENDING';
+        WHERE market_id = $1 AND user_id = $2 AND status IN ('PENDING', 'READY');
       `, [market_id, user_id]);
 
       await logPlatformAudit(market_id, user_id, 'MANAGER_REVOKED', 'لێسەندنەوەی یەکجارەکی دەسەڵاتی بەڕێوەبەر', 'PLATFORM_OWNER', reason);
@@ -5856,7 +6274,7 @@ app.post('/api/platform/markets/:market_id/replace-manager', async (req, res) =>
       await client.query(`
         UPDATE public.activation_tokens
         SET status = 'REVOKED'
-        WHERE market_id = $1 AND status = 'PENDING';
+        WHERE market_id = $1 AND status IN ('PENDING', 'READY');
       `, [market_id]);
 
       await client.query(`
@@ -6752,7 +7170,7 @@ app.post('/api/auth/activate', async (req, res) => {
         SELECT status FROM public.activation_tokens WHERE id = $1 FOR UPDATE;
       `, [record.id]);
 
-      if (tokenLockRes.rows.length === 0 || tokenLockRes.rows[0].status !== 'PENDING') {
+      if (tokenLockRes.rows.length === 0 || (tokenLockRes.rows[0].status !== 'PENDING' && tokenLockRes.rows[0].status !== 'READY')) {
         await client.query('ROLLBACK;');
         return res.status(400).json({
           status: 'error',
@@ -6785,6 +7203,8 @@ app.post('/api/auth/activate', async (req, res) => {
           ON CONFLICT (id) DO UPDATE
           SET auth_user_id = $1,
               full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), public.users.full_name),
+              email = EXCLUDED.email,
+              phone = EXCLUDED.phone,
               is_active = true,
               updated_at = NOW();
         `, [
@@ -6819,7 +7239,7 @@ app.post('/api/auth/activate', async (req, res) => {
       const consumeRes = await client.query(`
         UPDATE public.activation_tokens
         SET status = 'CONSUMED', consumed_at = NOW()
-        WHERE id = $1 AND status = 'PENDING';
+        WHERE id = $1 AND status IN ('PENDING', 'READY');
       `, [record.id]);
 
       if (consumeRes.rowCount === 0) {
@@ -7169,7 +7589,13 @@ const tempUnlockHandler = async (req: any, res: any) => {
 
   const custId = req.params.id;
   const { reason, hours, max_amount, currency } = req.body || {};
-  const cust = db.customers.find(c => c.id === custId);
+  let cust = db.customers.find(c => c.id === custId);
+  if (!cust && pool) {
+    try {
+      const cRes = await pool.query('SELECT * FROM public.customers WHERE id = $1', [custId]);
+      if (cRes.rows.length > 0) cust = cRes.rows[0];
+    } catch {}
+  }
   if (!cust) return res.status(404).json({ status: 'error', message: 'کڕیار نەدۆزرایەوە' });
 
   if (permCheck.marketId && cust.market_id !== permCheck.marketId) {
@@ -7202,8 +7628,13 @@ const tempUnlockHandler = async (req: any, res: any) => {
         else dbUserId = null;
       }
       if (!dbUserId) {
-        const fallbackUser = await pool.query(`SELECT id FROM public.users WHERE market_id = $1 LIMIT 1`, [cust.market_id]);
+        const fallbackUser = await pool.query(`SELECT id FROM public.users LIMIT 1`);
         if (fallbackUser.rows.length > 0) dbUserId = fallbackUser.rows[0].id;
+        else {
+          const newUserId = 'user-' + Date.now();
+          await pool.query(`INSERT INTO public.users (id, auth_user_id, full_name, email, is_active, created_at) VALUES ($1, $2, 'System User', 'system@test.com', true, NOW())`, [newUserId, crypto.randomUUID()]);
+          dbUserId = newUserId;
+        }
       }
       if (dbUserId) {
         await pool.query(
@@ -7211,9 +7642,11 @@ const tempUnlockHandler = async (req: any, res: any) => {
            VALUES ($1, $2, $3, $4, $5, $6, 'UNTIL_TIME', $7, $8, $9, NOW())`,
           [unlockRecord.id, unlockRecord.customer_id, unlockRecord.market_id, dbUserId, unlockRecord.reason, unlockRecord.currency, unlockRecord.max_amount, unlockRecord.status, unlockRecord.expires_at]
         );
+        console.log('[TEMP UNLOCK INSERTED TO DB]', unlockRecord);
       }
-    } catch (err) {
-      console.error('[TEMP UNLOCK DB INSERT ERROR]:', err);
+    } catch (err: any) {
+      console.error('[TEMP UNLOCK DB INSERT ERROR]:', err?.message, err?.code, err?.detail, err?.hint);
+      return res.status(500).json({ status: 'error', message: err?.message, detail: err?.detail, code: err?.code });
     }
   }
   if (!(db as any).temporary_debt_unlocks) (db as any).temporary_debt_unlocks = [];
@@ -7711,8 +8144,13 @@ app.post('/api/markets/:market_id/customers/:customer_id/promises', async (req, 
         else dbUserId = null;
       }
       if (!dbUserId) {
-        const fallbackUser = await pool.query(`SELECT id FROM public.users WHERE market_id = $1 LIMIT 1`, [market_id]);
+        const fallbackUser = await pool.query(`SELECT id FROM public.users LIMIT 1`);
         if (fallbackUser.rows.length > 0) dbUserId = fallbackUser.rows[0].id;
+        else {
+          const newUserId = 'user-' + Date.now();
+          await pool.query(`INSERT INTO public.users (id, auth_user_id, full_name, email, is_active, created_at) VALUES ($1, $2, 'System User', 'system@test.com', true, NOW())`, [newUserId, crypto.randomUUID()]);
+          dbUserId = newUserId;
+        }
       }
 
       await pool.query(
@@ -7720,8 +8158,9 @@ app.post('/api/markets/:market_id/customers/:customer_id/promises', async (req, 
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', NOW(), $8)`,
         [promId, customer_id, market_id, validAmount.amountStr, validAmount.currency, promised_date, promiseRecord.note, dbUserId]
       );
-    } catch (err) {
-      console.error('[POST PROMISE DB ERROR]:', err);
+    } catch (err: any) {
+      console.error('[POST PROMISE DB ERROR]:', err?.message, err?.detail, err?.code);
+      return res.status(500).json({ status: 'error', message: err?.message, detail: err?.detail });
     }
   }
   if (!(db as any).payment_promises) (db as any).payment_promises = [];

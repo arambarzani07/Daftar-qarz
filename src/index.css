@@ -133,3 +133,42 @@ html.light-mode ::-webkit-scrollbar-thumb {
   background: #C7C7CC;
 }
 
+/* Premium Transaction Bubbles */
+.tx-bubble-debt {
+  background-color: #1C1C1E;
+  color: #F5F5F7;
+  border: 1px solid rgba(44, 44, 46, 0.6);
+}
+
+html.light-mode .tx-bubble-debt {
+  background-color: #FFFFFF !important;
+  color: #1C1C1E !important;
+  border-color: #E5E5EA !important;
+}
+
+.tx-bubble-payment {
+  background-color: rgba(16, 185, 129, 0.08);
+  color: #A7F3D0;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+html.light-mode .tx-bubble-payment {
+  background-color: rgba(209, 250, 229, 0.65) !important;
+  color: #065F46 !important;
+  border-color: #A7F3D0 !important;
+}
+
+.tx-bubble-reversed {
+  background-color: rgba(28, 28, 30, 0.4);
+  border: 1px solid rgba(220, 38, 38, 0.15);
+  opacity: 0.55;
+  color: #F5F5F7;
+}
+
+html.light-mode .tx-bubble-reversed {
+  background-color: rgba(244, 244, 245, 0.65) !important;
+  border-color: rgba(220, 38, 38, 0.15) !important;
+  color: #636366 !important;
+}
+
+

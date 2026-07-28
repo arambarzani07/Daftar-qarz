@@ -16,6 +16,8 @@ interface CustomerAdvancedProfileModalProps {
   transactions: Transaction[];
   marketName: string;
   onCustomerUpdated?: () => void;
+  userRole?: string;
+  userPermissions?: string[];
 }
 
 export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModalProps> = ({
@@ -24,8 +26,13 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
   customer,
   transactions,
   marketName,
-  onCustomerUpdated
+  onCustomerUpdated,
+  userRole,
+  userPermissions
 }) => {
+  const isManager = userRole === 'MARKET_MANAGER' || !userRole;
+  const hasPermission = (perm: string) => isManager || !!(userPermissions?.includes(perm));
+
   const [activeTab, setActiveTab] = useState<'summary' | 'statement' | 'info' | 'credit' | 'risk' | 'promises' | 'reminders' | 'attachments' | 'disputes' | 'audit'>('summary');
   const [profileData, setProfileData] = useState<CustomerAdvancedProfileData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -426,6 +433,13 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
     { id: 'audit', label: 'مێژووی چاڵاکی', icon: History },
   ] as const;
 
+  const visibleNavItems = navItems.filter((item) => {
+    if (item.id === 'audit') {
+      return isManager || hasPermission('VIEW_ANALYTICS');
+    }
+    return true;
+  });
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/85 backdrop-blur-xs">
       <div className="relative w-full max-w-2xl bg-[#1C1C1E] rounded-3xl border border-[#2C2C2E] max-h-[92vh] flex flex-col overflow-hidden animate-slide-up text-[#F5F5F7]">
@@ -452,7 +466,7 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
 
         {/* Tabs Bar */}
         <div className="flex overflow-x-auto gap-1 p-2 bg-[#000000] border-b border-[#2C2C2E] no-scrollbar">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
             return (
@@ -719,161 +733,192 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
               )}
 
               {/* TAB 3: CUSTOMER INFO */}
-              {activeTab === 'info' && (
-                <form onSubmit={handleSaveInfo} className="space-y-3 bg-[#000000] p-4 rounded-2xl border border-[#2C2C2E] text-xs">
-                  <div>
-                    <label className="text-[#8E8E93] block mb-1 font-bold">ناوی تەواوی قەرزدار *</label>
-                    <input
-                      type="text"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                      required
-                    />
-                  </div>
+              {activeTab === 'info' && (() => {
+                const canEditInfo = hasPermission('ADD_CUSTOMER');
+                return (
+                  <form onSubmit={handleSaveInfo} className="space-y-3 bg-[#000000] p-4 rounded-2xl border border-[#2C2C2E] text-xs">
+                    <div>
+                      <label className="text-[#8E8E93] block mb-1 font-bold">ناوی تەواوی قەرزدار *</label>
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        disabled={!canEditInfo}
+                        className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        required
+                      />
+                    </div>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">ناوی لاتینی</label>
-                      <input
-                        type="text"
-                        value={editLatinName}
-                        onChange={(e) => setEditLatinName(e.target.value)}
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                      />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">ناوی لاتینی</label>
+                        <input
+                          type="text"
+                          value={editLatinName}
+                          onChange={(e) => setEditLatinName(e.target.value)}
+                          disabled={!canEditInfo}
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">ژمارەی تەلەفۆن</label>
+                        <input
+                          type="text"
+                          value={editPhone}
+                          onChange={(e) => setEditPhone(e.target.value)}
+                          disabled={!canEditInfo}
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] dir-ltr ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">ژمارەی تەلەفۆن</label>
-                      <input
-                        type="text"
-                        value={editPhone}
-                        onChange={(e) => setEditPhone(e.target.value)}
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] dir-ltr"
-                      />
-                    </div>
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">واتساپ</label>
+                        <input
+                          type="text"
+                          value={editWhatsapp}
+                          onChange={(e) => setEditWhatsapp(e.target.value)}
+                          disabled={!canEditInfo}
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] dir-ltr ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">دۆخی هەژمار</label>
+                        <select
+                          value={editStatus}
+                          onChange={(e) => setEditStatus(e.target.value as any)}
+                          disabled={!canEditInfo}
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        >
+                          <option value="ACTIVE">چالاک</option>
+                          <option value="INACTIVE">ناچالاک</option>
+                          <option value="ARCHIVED">ئەرشیڤکراو</option>
+                        </select>
+                      </div>
+                    </div>
+
                     <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">واتساپ</label>
+                      <label className="text-[#8E8E93] block mb-1 font-bold">ناونیشان</label>
                       <input
                         type="text"
-                        value={editWhatsapp}
-                        onChange={(e) => setEditWhatsapp(e.target.value)}
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] dir-ltr"
+                        value={editAddress}
+                        onChange={(e) => setEditAddress(e.target.value)}
+                        disabled={!canEditInfo}
+                        className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
                       />
                     </div>
+
                     <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">دۆخی هەژمار</label>
-                      <select
-                        value={editStatus}
-                        onChange={(e) => setEditStatus(e.target.value as any)}
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
+                      <label className="text-[#8E8E93] block mb-1 font-bold">تێبینی سەرەکی</label>
+                      <textarea
+                        value={editNotes}
+                        onChange={(e) => setEditNotes(e.target.value)}
+                        disabled={!canEditInfo}
+                        rows={2}
+                        className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                      />
+                    </div>
+
+                    {!canEditInfo ? (
+                      <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400 text-xs">
+                        <Lock className="w-4 h-4 shrink-0" />
+                        <span>تۆ دەسەڵاتی دەستکاریی زانیارییەکانی کڕیارت نییە.</span>
+                      </div>
+                    ) : (
+                      <button
+                        type="submit"
+                        disabled={savingInfo}
+                        className="w-full py-2.5 bg-[#34C759] text-black font-extrabold rounded-xl hover:bg-[#2EB14E] transition-all"
                       >
-                        <option value="ACTIVE">چالاک</option>
-                        <option value="INACTIVE">ناچالاک</option>
-                        <option value="ARCHIVED">ئەرشیڤکراو</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[#8E8E93] block mb-1 font-bold">ناونیشان</label>
-                    <input
-                      type="text"
-                      value={editAddress}
-                      onChange={(e) => setEditAddress(e.target.value)}
-                      className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[#8E8E93] block mb-1 font-bold">تێبینی سەرەکی</label>
-                    <textarea
-                      value={editNotes}
-                      onChange={(e) => setEditNotes(e.target.value)}
-                      rows={2}
-                      className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={savingInfo}
-                    className="w-full py-2.5 bg-[#34C759] text-black font-extrabold rounded-xl hover:bg-[#2EB14E] transition-all"
-                  >
-                    {savingInfo ? 'لە خەزنکردندایە...' : 'خەزنکردنی گۆڕانکارییەکان'}
-                  </button>
-                </form>
-              )}
+                        {savingInfo ? 'لە خەزنکردندایە...' : 'خەزنکردنی گۆڕانکارییەکان'}
+                      </button>
+                    )}
+                  </form>
+                );
+              })()}
 
               {/* TAB 4: CREDIT LIMIT & LOCK */}
-              {activeTab === 'credit' && (
-                <form onSubmit={handleSaveCredit} className="space-y-4 bg-[#000000] p-4 rounded-2xl border border-[#2C2C2E] text-xs">
-                  <h4 className="font-bold text-[#34C759] border-b border-[#2C2C2E] pb-2 flex items-center gap-1.5">
-                    <Lock className="w-4 h-4" />
-                    <span>کۆنتڕۆڵی سنووری قەرز و قفڵکردنی هەژمار</span>
-                  </h4>
+              {activeTab === 'credit' && (() => {
+                const canEditCredit = hasPermission('MANAGE_CREDIT_LIMIT');
+                return (
+                  <form onSubmit={handleSaveCredit} className="space-y-4 bg-[#000000] p-4 rounded-2xl border border-[#2C2C2E] text-xs">
+                    <h4 className="font-bold text-[#34C759] border-b border-[#2C2C2E] pb-2 flex items-center gap-1.5">
+                      <Lock className="w-4 h-4" />
+                      <span>کۆنتڕۆڵی سنووری قەرز و قفڵکردنی هەژمار</span>
+                    </h4>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">سنووری قەرز (IQD)</label>
-                      <input
-                        type="number"
-                        value={limitIqd}
-                        onChange={(e) => setLimitIqd(e.target.value)}
-                        placeholder="0 = بێ سنوور"
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                      />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">سنووری قەرز (IQD)</label>
+                        <input
+                          type="number"
+                          value={limitIqd}
+                          onChange={(e) => setLimitIqd(e.target.value)}
+                          disabled={!canEditCredit}
+                          placeholder="0 = بێ سنوور"
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditCredit ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[#8E8E93] block mb-1 font-bold">سنووری قەرز ($ USD)</label>
+                        <input
+                          type="number"
+                          value={limitUsd}
+                          onChange={(e) => setLimitUsd(e.target.value)}
+                          disabled={!canEditCredit}
+                          placeholder="0 = بێ سنوور"
+                          className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditCredit ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
                     </div>
+
                     <div>
-                      <label className="text-[#8E8E93] block mb-1 font-bold">سنووری قەرز ($ USD)</label>
-                      <input
-                        type="number"
-                        value={limitUsd}
-                        onChange={(e) => setLimitUsd(e.target.value)}
-                        placeholder="0 = بێ سنوور"
-                        className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                      />
+                      <label className="text-[#8E8E93] block mb-1 font-bold">سیاسەتی سنووردارکردن</label>
+                      <select
+                        value={creditPolicy}
+                        onChange={(e) => setCreditPolicy(e.target.value as any)}
+                        disabled={!canEditCredit}
+                        className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditCredit ? 'opacity-60 cursor-not-allowed' : ''}`}
+                      >
+                        <option value="NONE">هیچ (ئاگاداری یان ڕاگرتن نییە)</option>
+                        <option value="SOFT">ئاگاداری نەرم (ڕێگە بە زیادکردنی قەرز دەدات)</option>
+                        <option value="HARD">ڕاگرتنی توند (ڕێگری لە قەرزی نوێ دەکات)</option>
+                      </select>
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="text-[#8E8E93] block mb-1 font-bold">سیاسەتی سنووردارکردن</label>
-                    <select
-                      value={creditPolicy}
-                      onChange={(e) => setCreditPolicy(e.target.value as any)}
-                      className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                    >
-                      <option value="NONE">هیچ (ئاگاداری یان ڕاگرتن نییە)</option>
-                      <option value="SOFT">ئاگاداری نەرم (ڕێگە بە زیادکردنی قەرز دەدات)</option>
-                      <option value="HARD">ڕاگرتنی توند (ڕێگری لە قەرزی نوێ دەکات)</option>
-                    </select>
-                  </div>
+                    <div>
+                      <label className="text-[#8E8E93] block mb-1 font-bold">دۆخی قفڵکردنی هەژمار</label>
+                      <select
+                        value={lockStatus}
+                        onChange={(e) => setLockStatus(e.target.value as any)}
+                        disabled={!canEditCredit}
+                        className={`w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759] ${!canEditCredit ? 'opacity-60 cursor-not-allowed' : ''}`}
+                      >
+                        <option value="ACTIVE">ئاسایی و چالاک</option>
+                        <option value="SOFT_WARNING">ئاگاداری نەرم</option>
+                        <option value="LOCKED">🔒 قفڵکراو - ڕێگری تەواو لە قەرزی نوێ</option>
+                        <option value="TEMPORARY_UNLOCK">🔓 کراوەی کاتی</option>
+                      </select>
+                    </div>
 
-                  <div>
-                    <label className="text-[#8E8E93] block mb-1 font-bold">دۆخی قفڵکردنی هەژمار</label>
-                    <select
-                      value={lockStatus}
-                      onChange={(e) => setLockStatus(e.target.value as any)}
-                      className="w-full bg-[#1C1C1E] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-[#34C759]"
-                    >
-                      <option value="ACTIVE">ئاسایی و چالاک</option>
-                      <option value="SOFT_WARNING">ئاگاداری نەرم</option>
-                      <option value="LOCKED">🔒 قفڵکراو - ڕێگری تەواو لە قەرزی نوێ</option>
-                      <option value="TEMPORARY_UNLOCK">🔓 کراوەی کاتی</option>
-                    </select>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={savingCredit}
-                    className="w-full py-2.5 bg-[#34C759] text-black font-extrabold rounded-xl hover:bg-[#2EB14E]"
-                  >
-                    {savingCredit ? 'نوێکردنەوە...' : 'خەزنکردنی بەڕێوەبردنی قەرز'}
-                  </button>
-                </form>
-              )}
+                    {!canEditCredit ? (
+                      <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400 text-xs">
+                        <Lock className="w-4 h-4 shrink-0" />
+                        <span>تۆ دەسەڵاتی دەستکاریی سنوری قەرزی کڕیارت نییە.</span>
+                      </div>
+                    ) : (
+                      <button
+                        type="submit"
+                        disabled={savingCredit}
+                        className="w-full py-2.5 bg-[#34C759] text-black font-extrabold rounded-xl hover:bg-[#2EB14E]"
+                      >
+                        {savingCredit ? 'نوێکردنەوە...' : 'خەزنکردنی بەڕێوەبردنی قەرز'}
+                      </button>
+                    )}
+                  </form>
+                );
+              })()}
 
               {/* TAB 5: RISK & TRUST */}
               {activeTab === 'risk' && (

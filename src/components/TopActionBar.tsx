@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw, UserPlus, Search, Settings, Store } from 'lucide-react';
+import { RefreshCw, UserPlus, Search, Settings, Store, Lock } from 'lucide-react';
 
 interface TopActionBarProps {
   onRefresh: () => void;
@@ -8,6 +8,7 @@ interface TopActionBarProps {
   onOpenSettings: () => void;
   isRefreshing?: boolean;
   marketName?: string;
+  canAddCustomer?: boolean;
 }
 
 export const TopActionBar: React.FC<TopActionBarProps> = ({
@@ -16,7 +17,8 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
   onOpenSearch,
   onOpenSettings,
   isRefreshing = false,
-  marketName
+  marketName,
+  canAddCustomer = true
 }) => {
   const displayName = marketName?.trim() || 'سوپەرمارکێت';
 
@@ -41,10 +43,21 @@ export const TopActionBar: React.FC<TopActionBarProps> = ({
             id="action-add-customer"
             onClick={onAddCustomer}
             aria-label="زیادکردنی قەرزدار"
-            className="text-[#F5F5F7] p-1.5 rounded-xl hover:bg-[#1C1C1E] active:scale-95 transition-all text-[#8E8E93] hover:text-emerald-400 flex items-center gap-1"
-            title="زیادکردنی قەرزداری نوێ"
+            className={`p-1.5 rounded-xl active:scale-95 transition-all flex items-center gap-1 ${
+              canAddCustomer
+                ? 'text-[#8E8E93] hover:text-emerald-400 hover:bg-[#1C1C1E]'
+                : 'text-[#8E8E93]/40 hover:text-amber-500'
+            }`}
+            title={canAddCustomer ? "زیادکردنی قەرزداری نوێ" : "زیادکردنی کڕیار ڕێگەپێنەدراوە"}
           >
-            <UserPlus className="w-5 h-5 stroke-[2]" />
+            {canAddCustomer ? (
+              <UserPlus className="w-5 h-5 stroke-[2]" />
+            ) : (
+              <div className="relative">
+                <UserPlus className="w-5 h-5 stroke-[2] opacity-50" />
+                <Lock className="w-3 h-3 text-amber-500 absolute -bottom-1 -left-1" />
+              </div>
+            )}
           </button>
         </div>
 

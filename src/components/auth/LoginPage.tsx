@@ -39,6 +39,9 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setIsLoading(true);
 
     try {
+      let backendErrorMessage: string | null = null;
+      let hasTriedBackend = false;
+
       // 1. Try backend API /api/auth/login first (direct PostgreSQL & system user auth)
       try {
         const loginRes = await fetch('/api/auth/login', {
@@ -47,9 +50,13 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
           body: JSON.stringify({ identity: trimmedIdentifier, password })
         });
         const loginJson = await loginRes.json();
+        hasTriedBackend = true;
         if (loginRes.ok && loginJson.status === 'success' && loginJson.data) {
           const { session_token, activeContext, identity } = loginJson.data;
           const cleanToken = String(session_token || '').replace(/[^a-zA-Z0-9_\-.]/g, '').trim();
+          if (!cleanToken) {
+            throw new Error('تۆکنی هاتوو بەتاڵە یان نادروستە');
+          }
           localStorage.setItem('zhirox_session_token', cleanToken);
           localStorage.removeItem('zhirox_active_context');
           
@@ -65,9 +72,23 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
           
           onLoginSuccess(cleanToken, activeContext, contexts || [activeContext]);
           return;
+        } else if (loginJson && loginJson.message) {
+          backendErrorMessage = loginJson.message;
         }
       } catch (backendErr) {
         console.error('Backend login API error, falling back to Supabase:', backendErr);
+      }
+
+      // Check if Supabase client is a placeholder
+      const isPlaceholder = !import.meta.env.VITE_SUPABASE_URL || 
+                            import.meta.env.VITE_SUPABASE_URL.includes('placeholder') ||
+                            !import.meta.env.VITE_SUPABASE_ANON_KEY || 
+                            import.meta.env.VITE_SUPABASE_ANON_KEY.includes('placeholder');
+
+      if (isPlaceholder) {
+        setErrorMessage(backendErrorMessage || 'ژمارەی مۆبایل/ئیمەیڵ یان وشەی نهێنی هەڵەیە.');
+        setIsLoading(false);
+        return;
       }
 
       // 2. Fallback to Supabase client auth
@@ -78,8 +99,17 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
           password
         });
       } else {
+        const rawPhone = trimmedIdentifier.replace(/\D/g, '');
+        let formattedPhone = '+' + rawPhone;
+        if (rawPhone.startsWith('964')) {
+          formattedPhone = '+' + rawPhone;
+        } else if (rawPhone.startsWith('07')) {
+          formattedPhone = '+964' + rawPhone.slice(1);
+        } else if (rawPhone.startsWith('7')) {
+          formattedPhone = '+964' + rawPhone;
+        }
         authResponse = await supabase.auth.signInWithPassword({
-          phone: trimmedIdentifier.replace(/\s+/g, ''),
+          phone: formattedPhone,
           password
         });
       }

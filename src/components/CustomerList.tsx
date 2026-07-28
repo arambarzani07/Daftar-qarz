@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Customer, SortOption } from '../types';
 import { CustomerDebtCard } from './CustomerDebtCard';
-import { UserPlus, ArrowUpDown, ChevronDown, Filter, Users, CheckCircle2, AlertCircle } from 'lucide-react';
+import { UserPlus, ArrowUpDown, ChevronDown, Filter, Users, CheckCircle2, AlertCircle, Lock } from 'lucide-react';
 
 interface CustomerListProps {
   customers: Customer[];
@@ -10,6 +10,7 @@ interface CustomerListProps {
   currentSort: SortOption;
   onSortChange: (sort: SortOption) => void;
   isLoading?: boolean;
+  canAddCustomer?: boolean;
 }
 
 type FilterStatus = 'all' | 'debtors' | 'settled';
@@ -20,7 +21,8 @@ export const CustomerList: React.FC<CustomerListProps> = ({
   onAddCustomer,
   currentSort,
   onSortChange,
-  isLoading = false
+  isLoading = false,
+  canAddCustomer = true
 }) => {
   const [showSortSheet, setShowSortSheet] = useState(false);
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
@@ -163,10 +165,19 @@ export const CustomerList: React.FC<CustomerListProps> = ({
             <button
               id="empty-state-add-btn"
               onClick={onAddCustomer}
-              className="inline-flex items-center justify-center gap-2 bg-[#2C2C2E] active:bg-[#3A3A3C] text-[#F5F5F7] font-bold px-5 py-3 rounded-xl transition-all"
+              disabled={!canAddCustomer}
+              className={`inline-flex items-center justify-center gap-2 font-bold px-5 py-3 rounded-xl transition-all ${
+                canAddCustomer
+                  ? 'bg-[#2C2C2E] active:bg-[#3A3A3C] text-[#F5F5F7]'
+                  : 'bg-[#2C2C2E]/50 text-[#8E8E93] cursor-not-allowed opacity-60'
+              }`}
             >
-              <UserPlus className="w-5 h-5 text-emerald-400" />
-              <span>زیادکردنی قەرزدار</span>
+              {canAddCustomer ? (
+                <UserPlus className="w-5 h-5 text-emerald-400" />
+              ) : (
+                <Lock className="w-5 h-5 text-amber-500" />
+              )}
+              <span>{canAddCustomer ? 'زیادکردنی قەرزدار' : 'زیادکردنی کڕیار ڕێگەپێنەدراوە'}</span>
             </button>
           </div>
         )}

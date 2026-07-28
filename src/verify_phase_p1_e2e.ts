@@ -24,6 +24,13 @@ function generateTestJwt(authUserId: string): string {
 async function runE2E() {
   console.log('=== ZHIROX DEBT SYSTEM PHASE P1 LIVE E2E PROOF RUN ===\n');
 
+  // MANDATORY SAFETY GUARD
+  const dbUrl = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';
+  if ((dbUrl.includes('supabase.co') || dbUrl.includes('live') || dbUrl.includes('production') || process.env.NODE_ENV === 'production') && process.env.ALLOW_DESTRUCTIVE_TEST_FIXTURES !== 'true') {
+    console.error('CRITICAL ERROR: Test fixture script rejected to protect live/production database. Set ALLOW_DESTRUCTIVE_TEST_FIXTURES=true or use a dedicated test database.');
+    process.exit(1);
+  }
+
   if (!pool) {
     console.error('FAIL: PostgreSQL pool is not available.');
     process.exit(1);
@@ -367,7 +374,8 @@ async function runE2E() {
       })
     });
     const txData11 = await txRes11.json();
-    console.log(`[STEP 11 Response] Status: ${txRes11.status}, Tx ID: ${txData11.data?.transaction?.id}`);
+    console.log(`[STEP 11 Response] Status: ${txRes11.status}, Data: ${JSON.stringify(txData11, null, 2)}`);
+    console.log('[STEP 11 DEBUG DECISION]:', JSON.stringify(txData11.decision, null, 2));
     if ((txRes11.status === 200 || txRes11.status === 201) && txData11.data?.transaction?.id) {
       console.log('✓ Step 11 Passed: Debt addition allowed under temp unlock.\n');
     } else {
@@ -547,7 +555,31 @@ async function runE2E() {
     console.error('\n❌ E2E VERIFICATION FAILED:', error);
     process.exit(1);
   } finally {
+    console.log('\n[CLEANUP] Automatically purging test fixtures to prevent database contamination...');
+    try {
+      await client.query(`ALTER TABLE public.audit_logs DISABLE TRIGGER trg_prevent_audit_mutation`);
+      await client.query(`DELETE FROM public.audit_logs WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.audit_logs WHERE actor_user_id = ANY($1::text[])`, [[mgrUserId, empUserId]]);
+      await client.query(`DELETE FROM public.ledger_entries WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.customer_balances WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.customer_credit_settings WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.customer_debt_controls WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.temporary_debt_unlocks WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.approval_requests WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.payment_promises WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.recovery_cases WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.recovery_activities WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.customers WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.market_memberships WHERE market_id = $1`, [testMarketId]);
+      await client.query(`DELETE FROM public.users WHERE id = ANY($1::text[])`, [[mgrUserId, empUserId]]);
+      await client.query(`DELETE FROM public.markets WHERE id = $1`, [testMarketId]);
+      await client.query(`ALTER TABLE public.audit_logs ENABLE TRIGGER trg_prevent_audit_mutation`);
+      console.log('✓ Test fixtures successfully purged.');
+    } catch (cleanErr) {
+      console.error('Warning: automatic cleanup error:', cleanErr);
+    }
     client.release();
+    await pool.end();
     process.exit(0);
   }
 }
