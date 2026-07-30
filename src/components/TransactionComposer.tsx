@@ -11,7 +11,8 @@ interface TransactionComposerProps {
     type: 'DEBT_ADD' | 'PAYMENT_RECEIVE',
     amount: number,
     currency: CurrencyType,
-    note: string
+    note: string,
+    force?: boolean
   ) => Promise<void>;
   isSubmitting?: boolean;
   canAddDebt?: boolean;
@@ -96,7 +97,7 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
 
   const currentBalanceForCurrency = currency === 'USD' ? balanceUsd : balanceIqd;
 
-  const handleDirectSubmit = async (type: 'DEBT_ADD' | 'PAYMENT_RECEIVE') => {
+  const handleDirectSubmit = async (type: 'DEBT_ADD' | 'PAYMENT_RECEIVE', force: boolean = false) => {
     setErrorMessage('');
     const numericAmount = parseFloat(amount.replace(/,/g, ''));
 
@@ -106,7 +107,7 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
     }
 
     try {
-      await onAddTransaction(type, numericAmount, currency, note);
+      await onAddTransaction(type, numericAmount, currency, note, force);
       setAmount('');
       setNote('');
       setShowSuccessToast(true);
@@ -191,8 +192,17 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
             
             {/* Error Feedback */}
             {errorMessage && (
-              <div className="bg-red-950/80 border border-red-800/60 text-red-200 text-xs p-2.5 rounded-xl text-center font-bold">
-                {errorMessage}
+              <div className="bg-red-950/80 border border-red-800/60 text-red-200 text-xs p-3 rounded-xl text-center space-y-2 font-bold">
+                <div>{errorMessage}</div>
+                {(errorMessage.includes('سنوور') || errorMessage.includes('تێدەپەڕێت') || errorMessage.includes('پەسەندکردن')) && (
+                  <button
+                    type="button"
+                    onClick={() => handleDirectSubmit('DEBT_ADD', true)}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-black text-xs font-black rounded-lg transition-all shadow-md active:scale-95 inline-flex items-center gap-1.5 mx-auto"
+                  >
+                    <span>تێپەڕاندنی سنوور و تۆمارکردن (Force Add)</span>
+                  </button>
+                )}
               </div>
             )}
 

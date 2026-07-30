@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Customer, Transaction, CustomerAdvancedProfileData, StatementData } from '../types';
 import { formatMoney, formatTimestamp } from '../utils/formatters';
 import { authenticatedFetch } from '../utils/apiClient';
@@ -6,7 +6,7 @@ import {
   X, FileText, UserCheck, ShieldAlert, HeartPulse, 
   Handshake, Bell, Paperclip, AlertTriangle, History, 
   Share2, Send, Download, Plus, CheckCircle, Clock, Lock, Unlock, Edit3, Trash2, Printer,
-  Calendar, Filter, RefreshCw, ArrowUpRight, ArrowDownLeft
+  Calendar, Filter, RefreshCw, ArrowUpRight, ArrowDownLeft, Camera
 } from 'lucide-react';
 
 interface CustomerAdvancedProfileModalProps {
@@ -46,7 +46,120 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
   const [editAddress, setEditAddress] = useState(customer.address || '');
   const [editNotes, setEditNotes] = useState(customer.notes || '');
   const [editStatus, setEditStatus] = useState<'ACTIVE' | 'INACTIVE' | 'ARCHIVED'>(customer.status || 'ACTIVE');
+  const [editAvatarUrl, setEditAvatarUrl] = useState<string>(customer.avatar_url || '');
   const [savingInfo, setSavingInfo] = useState(false);
+
+  // Live Camera capture state
+  const [showLiveCameraModal, setShowLiveCameraModal] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+
+  const startLiveCamera = async () => {
+    setShowLiveCameraModal(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      mediaStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error('Camera access error:', err);
+      alert('نەتوانرا دەستپێگەیشتن بە کەمێرا بەدەست بهێنرێت. تکایە دڵنیابە لە ڕێپێدانی کەمێرا.');
+      setShowLiveCameraModal(false);
+    }
+  };
+
+  const stopLiveCamera = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setShowLiveCameraModal(false);
+  };
+
+  const processImageFile = (fileOrDataUrl: string | File) => {
+    if (typeof fileOrDataUrl === 'string') {
+      // It's already a dataUrl, resize it via canvas
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_DIM = 400;
+        let w = img.width;
+        let h = img.height;
+        if (w > h) {
+          if (w > MAX_DIM) {
+            h = Math.round((h * MAX_DIM) / w);
+            w = MAX_DIM;
+          }
+        } else {
+          if (h > MAX_DIM) {
+            w = Math.round((w * MAX_DIM) / h);
+            h = MAX_DIM;
+          }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, w, h);
+          setEditAvatarUrl(canvas.toDataURL('image/jpeg', 0.8));
+        }
+      };
+      img.src = fileOrDataUrl;
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_DIM = 400;
+          let w = img.width;
+          let h = img.height;
+          if (w > h) {
+            if (w > MAX_DIM) {
+              h = Math.round((h * MAX_DIM) / w);
+              w = MAX_DIM;
+            }
+          } else {
+            if (h > MAX_DIM) {
+              w = Math.round((w * MAX_DIM) / h);
+              h = MAX_DIM;
+            }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, w, h);
+            setEditAvatarUrl(canvas.toDataURL('image/jpeg', 0.8));
+          }
+        };
+        img.src = e.target?.result as string;
+      };
+      reader.readAsDataURL(fileOrDataUrl);
+    }
+  };
+
+  const captureSnapshot = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      processImageFile(dataUrl);
+    }
+    stopLiveCamera();
+  };
+
+  const handlePhotoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processImageFile(file);
+  };
 
   // Credit settings form state
   const [limitIqd, setLimitIqd] = useState('0');
@@ -131,6 +244,7 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
         setEditAddress(c.address || '');
         setEditNotes(c.notes || '');
         setEditStatus(c.status || 'ACTIVE');
+        setEditAvatarUrl(c.avatar_url || '');
 
         const cs = json.data.credit_settings;
         if (cs) {
@@ -174,7 +288,8 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
           whatsapp: editWhatsapp,
           address: editAddress,
           notes: editNotes,
-          status: editStatus
+          status: editStatus,
+          avatar_url: editAvatarUrl
         })
       });
       const json = await res.json();
@@ -737,6 +852,59 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
                 const canEditInfo = hasPermission('ADD_CUSTOMER');
                 return (
                   <form onSubmit={handleSaveInfo} className="space-y-3 bg-[#000000] p-4 rounded-2xl border border-[#2C2C2E] text-xs">
+                    {/* Customer Photo / Avatar Section */}
+                    <div className="flex flex-col sm:flex-row items-center gap-4 bg-[#1C1C1E] p-4 rounded-2xl border border-[#2C2C2E] mb-3">
+                      <div className="relative w-20 h-20 rounded-full overflow-hidden bg-[#2C2C2E] border-2 border-[#34C759]/40 flex items-center justify-center shrink-0">
+                        {editAvatarUrl ? (
+                          <img src={editAvatarUrl} alt={editName} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-xl font-black text-[#34C759]">
+                            {editName ? editName.charAt(0) : 'ک'}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex-1 text-center sm:text-right space-y-1">
+                        <div className="text-xs font-bold text-[#F5F5F7]">وێنەی پڕۆفایلی کڕیار</div>
+                        <div className="text-[11px] text-[#8E8E93]">دەتوانیت وێنەی کڕیار بە کەمێرا بگریت یان لە گەلەری هەڵبژێریت.</div>
+                        
+                        {canEditInfo && (
+                          <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={startLiveCamera}
+                              className="px-3 py-1.5 bg-[#34C759] hover:bg-[#2EB14E] text-black text-xs font-extrabold rounded-xl flex items-center gap-1.5 transition-all shadow-xs"
+                            >
+                              <Camera className="w-3.5 h-3.5" />
+                              <span>گرتنی وێنە بە کەمێرا</span>
+                            </button>
+
+                            <label className="px-3 py-1.5 bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer transition-all">
+                              <FileText className="w-3.5 h-3.5 text-[#34C759]" />
+                              <span>هەڵبژاردنی وێنە</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={handlePhotoFileChange}
+                              />
+                            </label>
+
+                            {editAvatarUrl && (
+                              <button
+                                type="button"
+                                onClick={() => setEditAvatarUrl('')}
+                                className="px-2.5 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 text-xs font-bold rounded-xl flex items-center gap-1 transition-all"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>سڕینەوە</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
                     <div>
                       <label className="text-[#8E8E93] block mb-1 font-bold">ناوی تەواوی قەرزدار *</label>
                       <input
@@ -1202,6 +1370,46 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
         </div>
 
       </div>
+
+      {/* Live Camera Capture Modal */}
+      {showLiveCameraModal && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md" dir="rtl">
+          <div className="bg-[#1C1C1E] border border-[#2C2C2E] rounded-3xl p-6 max-w-md w-full space-y-4 text-center">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-extrabold text-[#F5F5F7]">گرتنی وێنەی کڕیار بە کەمێرا</h3>
+              <button
+                type="button"
+                onClick={stopLiveCamera}
+                className="w-8 h-8 rounded-full bg-[#2C2C2E] flex items-center justify-center text-[#8E8E93] hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="relative rounded-2xl overflow-hidden bg-black aspect-video flex items-center justify-center border border-[#2C2C2E]">
+              <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+            </div>
+
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={captureSnapshot}
+                className="px-6 py-2.5 bg-[#34C759] hover:bg-[#2EB14E] text-black text-xs font-extrabold rounded-xl flex items-center gap-2 shadow-md transition-all"
+              >
+                <Camera className="w-4 h-4" />
+                <span>گرتنی وێنە (Snapshot)</span>
+              </button>
+              <button
+                type="button"
+                onClick={stopLiveCamera}
+                className="px-4 py-2.5 bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#8E8E93] text-xs font-bold rounded-xl transition-all"
+              >
+                پاشگەزبوونەوە
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,6 +1,8 @@
 {
   "name": "Zhirox Debt System",
   "description": "Fast digital Kurdish debt notebook for market customer debt management and transaction tracking.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "camera"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

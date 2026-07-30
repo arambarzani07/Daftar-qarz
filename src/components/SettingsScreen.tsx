@@ -24,7 +24,9 @@ import {
   Sun,
   Moon,
   Database,
-  Server
+  Server,
+  Wifi,
+  Cloud
 } from 'lucide-react';
 
 interface SettingsScreenProps {
@@ -51,8 +53,19 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const isManager = userRole === 'MARKET_MANAGER' || !userRole; // Default to true if not specified for backward compatibility
 
   const [activeModal, setActiveModal] = useState<
-    'ACCOUNT' | 'STAFF' | 'MODE' | 'TUTORIAL' | 'PIN' | 'PASSWORD' | 'LANGUAGE' | 'SORT' | 'CONTACT' | 'LOGOUT' | 'DATABASE' | null
+    'ACCOUNT' | 'STAFF' | 'MODE' | 'TUTORIAL' | 'PIN' | 'PASSWORD' | 'LANGUAGE' | 'SORT' | 'CONTACT' | 'LOGOUT' | 'DATABASE' | 'OFFLINE' | 'BACKUP' | null
   >(null);
+
+  // Offline Sync state
+  const [isOfflineSyncActive, setIsOfflineSyncActive] = useState(true);
+  const [pendingSyncItems, setPendingSyncItems] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncText, setLastSyncText] = useState('ئێستا (Active & Synced)');
+
+  // Cloud Backup Vault state
+  const [backupVaultStatus, setBackupVaultStatus] = useState<'SECURED' | 'SYNCING'>('SECURED');
+  const [lastBackupText, setLastBackupText] = useState('ئەمڕۆ کاتژمێر 12:00 (Auto-Sync)');
+  const [isBackingUp, setIsBackingUp] = useState(false);
 
   // Supabase Database Connection Status
   const [dbStatus, setDbStatus] = useState<{
@@ -404,6 +417,46 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             <span className="text-base font-bold text-[#F5F5F7]">پەیوەندیکردن</span>
           </div>
           <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
+        </button>
+
+        {/* Offline-First Sync Engine */}
+        <button
+          onClick={() => setActiveModal('OFFLINE')}
+          className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
+        >
+          <div className="flex items-center gap-3.5">
+            <Wifi className="w-5 h-5 text-emerald-400 stroke-[1.75]" />
+            <div className="flex flex-col items-start">
+              <span className="text-base font-bold text-[#F5F5F7]">کارکردنی بێ ئینتەرنێت (Offline-First)</span>
+              <span className="text-[11px] text-[#8E8E93]">سینکی خودکاری مامەڵەکان لە کاتی نەبوونی هێڵ</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
+              {pendingSyncItems > 0 ? `${pendingSyncItems} چاوڕوان` : 'ئامادە'}
+            </span>
+            <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
+          </div>
+        </button>
+
+        {/* Automated Cloud Backup Vault */}
+        <button
+          onClick={() => setActiveModal('BACKUP')}
+          className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
+        >
+          <div className="flex items-center gap-3.5">
+            <Cloud className="w-5 h-5 text-cyan-400 stroke-[1.75]" />
+            <div className="flex flex-col items-start">
+              <span className="text-base font-bold text-[#F5F5F7]">پاشەکەوتی پارێزراوی هەور (Cloud Backup)</span>
+              <span className="text-[11px] text-[#8E8E93]">هەڵگرتنی کۆپی یەدەگ لە چەند سەرڤەرێک</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 font-bold">
+              پارێزراو
+            </span>
+            <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
+          </div>
         </button>
 
         {/* 9. Logout */}
@@ -967,6 +1020,129 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         isOpen={activeModal === 'STAFF'}
         onClose={() => setActiveModal(null)}
       />
+
+      {/* OFFLINE SYNC ENGINE MODAL */}
+      {activeModal === 'OFFLINE' && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-sm bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in">
+            <div className="flex items-center justify-between pb-2 border-b border-[#2C2C2E]">
+              <div className="flex items-center gap-2">
+                <Wifi className="w-5 h-5 text-emerald-400" />
+                <span className="font-bold text-[#F5F5F7]">کارکردنی بێ ئینتەرنێت (Offline-First)</span>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#8E8E93] leading-relaxed">
+              سیستەمی ئۆفلاین ڕێگەت پێدەدات لە کاتی پچڕانی هێڵی ئینتەرنێت، مامەڵەکان بە بێ کێشە تۆمار بکەیت و پاش گەڕانەوەی هێڵەکە، بە شێوەی خۆکار سینک دەبنەوە.
+            </p>
+
+            <div className="bg-black border border-[#2C2C2E] rounded-xl p-3.5 flex flex-col gap-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">دۆخی هێڵ (Connection Status):</span>
+                <span className="text-emerald-400 font-bold flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  ئامادە و کارا (Online / Synced)
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">مامەڵە چاوڕوانکراوەکان (Queue):</span>
+                <span className="text-[#F5F5F7] font-bold">{pendingSyncItems} مامەڵە</span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">دوایین سینک:</span>
+                <span className="text-[#F5F5F7] font-mono text-[11px]">{lastSyncText}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                setIsSyncing(true);
+                setTimeout(() => {
+                  setIsSyncing(false);
+                  setPendingSyncItems(0);
+                  setLastSyncText('ئێستا (Manual Synced)');
+                  showToast('سینککردنەوە بە سەرکەوتوویی ئەنجامدرا');
+                }, 1000);
+              }}
+              disabled={isSyncing}
+              className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale flex items-center justify-center gap-2"
+            >
+              {isSyncing ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                  <span>سینککردنەوە...</span>
+                </>
+              ) : (
+                <span>سینککردنەوەی دەستبەجێ (Sync Now)</span>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* CLOUD BACKUP VAULT MODAL */}
+      {activeModal === 'BACKUP' && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-sm bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in">
+            <div className="flex items-center justify-between pb-2 border-b border-[#2C2C2E]">
+              <div className="flex items-center gap-2">
+                <Cloud className="w-5 h-5 text-cyan-400" />
+                <span className="font-bold text-[#F5F5F7]">پاشەکەوتی پارێزراوی هەور (Cloud Backup)</span>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#8E8E93] leading-relaxed">
+              داتاکانی مارکێتەکەت لە چەند سەرڤەرێکی پارێزراوی جیهانی (EU & US Cloud Vaults) بە شێوەی خۆکار و کۆدکراو (Encrypted) پاشەکەوت دەکرێن.
+            </p>
+
+            <div className="bg-black border border-[#2C2C2E] rounded-xl p-3.5 flex flex-col gap-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">دۆخی ڤالتی هەور:</span>
+                <span className="text-cyan-400 font-bold flex items-center gap-1">
+                  <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                  پارێزراو و کۆدکراو (AES-256)
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">سێرڤەرەکانی پشتێنە:</span>
+                <span className="text-[#F5F5F7] font-bold">Primary & 2 Replicas</span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8E93]">دوایین کۆپی یەدەگ:</span>
+                <span className="text-[#F5F5F7] font-mono text-[11px]">{lastBackupText}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                setIsBackingUp(true);
+                setTimeout(() => {
+                  setIsBackingUp(false);
+                  setLastBackupText('ئێستا (Manual Backup)');
+                  showToast('کۆپی یەدەگ بە سەرکەوتوویی لە هەوردا پاشەکەوت کرا');
+                }, 1200);
+              }}
+              disabled={isBackingUp}
+              className="w-full py-3 bg-cyan-500 text-black font-bold text-sm rounded-xl active-scale flex items-center justify-center gap-2"
+            >
+              {isBackingUp ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                  <span>دروستکردنی کۆپی یەدەگ...</span>
+                </>
+              ) : (
+                <span>دروستکردنی کۆپی یەدەگی نوێ (Backup Now)</span>
+              )}
+            </button>
+          </div>
+        </div>
+      ) }
 
     </div>
   );

@@ -28,10 +28,10 @@ import { CustomerStatementModal } from './components/CustomerStatementModal';
 import { CustomerAdvancedProfileModal } from './components/CustomerAdvancedProfileModal';
 import { CustomerDebtCard } from './components/CustomerDebtCard';
 import { ShareLinkSheet } from './components/ShareLinkSheet';
-import { PublicCustomerBalanceView } from './components/PublicCustomerBalanceView';
 import { CustomerPortalView } from './components/CustomerPortalView';
 import { EditTransactionModal } from './components/EditTransactionModal';
 import { PrintStatementPage } from './components/PrintStatementPage';
+import { CustomerCreditStatusBanner } from './components/CustomerCreditStatusBanner';
 
 import { PlatformOwnerDashboard } from './components/platform/PlatformOwnerDashboard';
 
@@ -80,9 +80,21 @@ export default function App() {
       const isActivate = currentPath.startsWith('/activate');
       const isUpdatePassword = currentPath.startsWith('/auth/update-password');
       const isRecovery = currentPath.startsWith('/auth/recovery');
+      const isPortal = currentPath.startsWith('/portal/');
 
-      if (isPublic || isActivate || isUpdatePassword || isRecovery) {
+      if (isPublic || isActivate || isUpdatePassword || isRecovery || isPortal) {
         setAuthStatus('AUTHENTICATED');
+        if (isPortal && (!authState.activeContext || authState.activeContext.role !== 'CUSTOMER')) {
+          const parts = currentPath.split('/');
+          setAuthState({
+            status: 'AUTHENTICATED',
+            activeContext: {
+              role: 'CUSTOMER',
+              customer_id: parts[3] || 'me',
+              tenant_id: parts[2] || 'default'
+            }
+          });
+        }
         return;
       }
 
@@ -463,14 +475,15 @@ export default function App() {
     type: 'DEBT_ADD' | 'PAYMENT_RECEIVE',
     amount: number,
     currency: CurrencyType,
-    note: string
+    note: string,
+    force?: boolean
   ) => {
     if (!selectedCustomer) return;
     setIsSubmitting(true);
     try {
       const res = await apiFetch(`/api/customers/${selectedCustomer.id}/transactions`, {
         method: 'POST',
-        body: JSON.stringify({ type, amount, currency, note })
+        body: JSON.stringify({ type, amount, currency, note, force })
       });
       const json = await res.json();
       if (json.status === 'success') {
@@ -569,9 +582,9 @@ export default function App() {
     return true;
   });
 
-  // 1. If public share link URL detected, render Public Live Balance view
+  // 1. If public share link URL detected, render unified Customer Portal View
   if (publicToken) {
-    return <PublicCustomerBalanceView token={publicToken} />;
+    return <CustomerPortalView token={publicToken} onLogout={() => { window.location.href = '/'; }} />;
   }
 
   // 1b. Manager/Staff/Customer Activation Page Route
@@ -620,12 +633,14 @@ export default function App() {
     return <AccessDeniedPage onLogout={signOut} />;
   }
 
-  // Render Customer Portal View if persona is CUSTOMER
-  if (authState.activeContext?.role === 'CUSTOMER') {
+  // Render Customer Portal View if path is portal or persona is CUSTOMER
+  if (path.startsWith('/portal/') || authState.activeContext?.role === 'CUSTOMER') {
+    const parts = path.split('/');
+    const custId = authState.activeContext?.customer_id || parts[3] || 'me';
     return (
       <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] font-sans antialiased flex flex-col">
         <CustomerPortalView
-          customerId={authState.activeContext.customer_id || ''}
+          customerId={custId}
           onLogout={signOut}
         />
       </div>
@@ -711,6 +726,15 @@ export default function App() {
             onBack={() => setActiveScreen('home')}
             onOpenStatement={() => setIsStatementModalOpen(true)}
             onShareLink={() => setIsShareSheetOpen(true)}
+            onShareWhatsApp={() => setIsShareSheetOpen(true)}
+            onOpenAdvancedProfile={() => setIsAdvancedProfileOpen(true)}
+          />
+
+          {/* Credit Limit & Status Notification Banner */}
+          <CustomerCreditStatusBanner
+            customer={selectedCustomer}
+            marketId={authState.activeContext?.tenant_id || selectedCustomer.market_id}
+            onOpenAdvancedProfile={() => setIsAdvancedProfileOpen(true)}
           />
 
           {/* Scrollable Chat Timeline */}

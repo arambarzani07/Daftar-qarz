@@ -74,7 +74,7 @@ export const ShareLinkSheet: React.FC<ShareLinkSheetProps> = ({
       }
     } catch (e) {}
 
-    return 'https://zhirox.app';
+    return 'https://zhirox.com';
   };
 
   const getAbsoluteShareUrl = () => {

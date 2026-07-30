@@ -12,6 +12,7 @@ export interface Customer {
   password?: string;
   whatsapp?: string;
   address?: string;
+  avatar_url?: string;
   currency: CurrencyType;
   notes?: string;
   status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
