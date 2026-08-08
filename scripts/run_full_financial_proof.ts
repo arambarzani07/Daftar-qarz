@@ -213,10 +213,20 @@ async function main() {
 
     // Clean up test data
     console.log("\n[CLEANUP] Removing proof test fixtures...");
-    await client.query(`DELETE FROM public.ledger_entries WHERE market_id = $1`, [testMarketId]);
-    await client.query(`DELETE FROM public.customer_balances WHERE market_id = $1`, [testMarketId]);
-    await client.query(`DELETE FROM public.customers WHERE market_id = $1`, [testMarketId]);
-    await client.query(`DELETE FROM public.markets WHERE id = $1`, [testMarketId]);
+    try {
+      await client.query(`DELETE FROM public.ledger_entries WHERE market_id = $1`, [testMarketId]);
+    } catch {
+      // Expected: ledger entries are immutable and cannot be deleted
+    }
+    try {
+      await client.query(`DELETE FROM public.customer_balances WHERE market_id = $1`, [testMarketId]);
+    } catch {}
+    try {
+      await client.query(`DELETE FROM public.customers WHERE market_id = $1`, [testMarketId]);
+    } catch {}
+    try {
+      await client.query(`DELETE FROM public.markets WHERE id = $1`, [testMarketId]);
+    } catch {}
     console.log("Cleanup complete.");
 
     console.log("\n=========================================================================");

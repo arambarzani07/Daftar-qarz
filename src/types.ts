@@ -11,6 +11,8 @@ export interface Customer {
   phone?: string;
   password?: string;
   whatsapp?: string;
+  telegram_chat_id?: string;
+  telegram_username?: string;
   address?: string;
   avatar_url?: string;
   currency: CurrencyType;
@@ -225,11 +227,17 @@ export interface AppSettings {
   default_currency: CurrencyType;
   theme?: 'dark' | 'light';
   is_locked_by_system?: boolean;
+  telegram_bot_token?: string;
+  telegram_bot_username?: string;
+  telegram_enabled?: boolean;
+  telegram_notify_new_tx?: boolean;
+  telegram_notify_overdue?: boolean;
+  telegram_notify_promises?: boolean;
 }
 
 export type SortOption = 'newest' | 'oldest' | 'highest_debt' | 'lowest_debt' | 'recent' | 'alphabetical';
 
-export type ActiveScreen = 'home' | 'customer_profile' | 'search' | 'settings';
+export type ActiveScreen = 'home' | 'dashboard' | 'customers' | 'approvals' | 'protection' | 'settings' | 'customer_profile' | 'search' | 'control_plane';
 
 export type AuthPersona = 'PLATFORM_OWNER' | 'MARKET_MANAGER' | 'EMPLOYEE' | 'CUSTOMER';
 
@@ -451,6 +459,19 @@ export interface CustomerProtectionSummary {
   recent_activities?: RecoveryActivity[];
   pending_approvals?: ApprovalRequest[];
   recent_audits?: CustomerAuditLog[];
+}
+
+export interface ProtectionAlert {
+  id: string;
+  market_id: string;
+  customer_id?: string;
+  alert_type: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  title: string;
+  description: string;
+  status: 'OPEN' | 'RESOLVED' | 'DISMISSED';
+  created_at: string;
+  resolved_at?: string;
 }
 
 

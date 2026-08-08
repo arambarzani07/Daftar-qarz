@@ -16,6 +16,14 @@ export function formatMoney(amount: number, currency: CurrencyType = 'IQD'): str
   return `${formatted} دینار`;
 }
 
+export function formatIQD(amount: number): string {
+  return formatMoney(amount, 'IQD');
+}
+
+export function formatUSD(amount: number): string {
+  return formatMoney(amount, 'USD');
+}
+
 export function formatTimeOnly(isoString: string): string {
   if (!isoString) return '';
   try {

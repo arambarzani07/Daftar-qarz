@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { CurrencyType } from '../types';
-import { X, UserPlus, Phone, FileText, DollarSign, Lock, Eye, EyeOff } from 'lucide-react';
+import { X, UserPlus, Phone, FileText, DollarSign, Send } from 'lucide-react';
 
 interface AddCustomerSheetProps {
   isOpen: boolean;
@@ -9,7 +9,9 @@ interface AddCustomerSheetProps {
     name: string;
     latin_name?: string;
     phone: string;
-    password: string;
+    password?: string;
+    telegram_username?: string;
+    telegram_chat_id?: string;
     currency: CurrencyType;
     notes?: string;
   }) => Promise<void>;
@@ -24,8 +26,7 @@ export const AddCustomerSheet: React.FC<AddCustomerSheetProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
+  const [telegramUsername, setTelegramUsername] = useState('');
   const [notes, setNotes] = useState('');
   const [currency, setCurrency] = useState<CurrencyType>('IQD');
   const [errorMessage, setErrorMessage] = useState('');
@@ -44,22 +45,18 @@ export const AddCustomerSheet: React.FC<AddCustomerSheetProps> = ({
       setErrorMessage('تکایە ژمارەی مۆبایل بنووسە (زۆرەملێیە)');
       return;
     }
-    if (!password.trim()) {
-      setErrorMessage('تکایە وشەی نهێنی (پاسۆرد) بۆ کڕیار بنووسە (زۆرەملێیە)');
-      return;
-    }
 
     try {
       await onSubmit({
         name: name.trim(),
         phone: phone.trim(),
-        password: password.trim(),
+        telegram_username: telegramUsername.trim() ? telegramUsername.trim().replace(/^@/, '') : undefined,
         notes: notes.trim() || undefined,
         currency
       });
       setName('');
       setPhone('');
-      setPassword('');
+      setTelegramUsername('');
       setNotes('');
       onClose();
     } catch (err: any) {
@@ -134,29 +131,25 @@ export const AddCustomerSheet: React.FC<AddCustomerSheetProps> = ({
             />
           </div>
 
-          {/* PASSWORD INPUT */}
+          {/* TELEGRAM USERNAME INPUT */}
           <div className="space-y-1">
-            <label className="text-xs font-bold text-[#8E8E93] px-1 flex items-center gap-1">
-              <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              <span>وشەی نهێنی چوونەژوورەوەی کڕیار *</span>
+            <label className="text-xs font-bold text-[#8E8E93] px-1 flex items-center justify-between">
+              <span className="flex items-center gap-1">
+                <Send className="w-3.5 h-3.5 text-sky-400" />
+                <span>ئایدی تێلیگرام (Telegram @username)</span>
+              </span>
+              <span className="text-[10px] text-sky-400 font-normal">ئارەزوومەندانە</span>
             </label>
             <div className="relative">
+              <span className="absolute left-3 top-3.5 text-[#8E8E93] text-sm font-mono">@</span>
               <input
-                id="input-customer-password"
-                type={showPassword ? 'text' : 'password'}
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-black text-[#F5F5F7] text-sm p-3.5 pl-10 rounded-2xl border border-[#2C2C2E] focus:outline-none focus:border-emerald-500 placeholder-[#8E8E93]/50 dir-ltr text-right font-medium"
+                id="input-customer-telegram"
+                type="text"
+                value={telegramUsername}
+                onChange={(e) => setTelegramUsername(e.target.value)}
+                placeholder="username"
+                className="w-full bg-black text-[#F5F5F7] text-sm py-3.5 pl-8 pr-3 rounded-2xl border border-[#2C2C2E] focus:outline-none focus:border-sky-500 placeholder-[#8E8E93]/50 dir-ltr text-left font-mono"
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#8E8E93] hover:text-[#F5F5F7] transition-colors"
-              >
-                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
             </div>
           </div>
 

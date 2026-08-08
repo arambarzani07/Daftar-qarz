@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Customer, Transaction, PaymentPromise, CustomerReminder, CustomerDispute, CurrencyType } from '../types';
 import { formatMoney, formatTimestamp } from '../utils/formatters';
 import { authenticatedFetch } from '../utils/apiClient';
-import { LogOut, RefreshCw, User, Phone, DollarSign, Calendar, Bell, ShieldCheck, CheckCircle2, Clock, Lock, ShieldAlert, AlertTriangle, MessageSquare, Send, Sun, Moon } from 'lucide-react';
+import { LogOut, RefreshCw, User, Phone, DollarSign, Calendar, Bell, ShieldCheck, CheckCircle2, Clock, Lock, ShieldAlert, AlertTriangle, MessageSquare, Send } from 'lucide-react';
 
 interface CustomerPortalViewProps {
   customerId?: string;
@@ -20,7 +20,6 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({ customer
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isDarkMode, setIsDarkMode] = useState(true);
 
   // PIN state for public token
   const [pinRequired, setPinRequired] = useState(false);
@@ -219,18 +218,35 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({ customer
   }
 
   if (errorMessage || !customer) {
+    const isRevoked = errorMessage?.includes('لەکارخراوە') || errorMessage?.includes('کۆنەیە');
     return (
       <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] flex flex-col items-center justify-center p-6">
-        <div className="w-full max-w-sm bg-[#1C1C1E] rounded-3xl p-6 border border-[#2C2C2E] text-center space-y-4">
-          <div className="w-12 h-12 rounded-full bg-rose-900/30 text-rose-400 flex items-center justify-center mx-auto">
-            <AlertTriangle className="w-6 h-6" />
+        <div className="w-full max-w-md bg-[#1C1C1E] rounded-3xl p-6 border border-[#2C2C2E] text-center space-y-4 shadow-2xl">
+          <div className="w-14 h-14 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+            {isRevoked ? <ShieldAlert className="w-7 h-7" /> : <AlertTriangle className="w-7 h-7" />}
           </div>
-          <p className="text-sm text-rose-400 font-bold">{errorMessage || 'کڕیار نەدۆزرایەوە یان بەستەرەکە کۆتایی هاتووە'}</p>
+          
+          <div className="space-y-1">
+            <h2 className="text-base font-extrabold text-[#F5F5F7]">
+              {isRevoked ? 'ئەم بەستەرە لەکارخراوە (پەکخراوە)' : 'بەستەر چالاک نییە'}
+            </h2>
+            <p className="text-xs text-rose-300 font-semibold leading-relaxed">
+              {errorMessage || 'ئەم بەستەرە بەردەست نییە یان چیتر چالاک نییە.'}
+            </p>
+          </div>
+
+          {isRevoked && (
+            <div className="p-3 bg-black/50 rounded-2xl border border-[#2C2C2E] text-xs text-[#8E8E93] text-right space-y-1">
+              <p className="font-bold text-[#F5F5F7]">چۆن بەستەری نوێ وەربگرم؟</p>
+              <p>تکایە پەیوەندی بە مارکێت یان خاوەن کار بکە بۆ ئەوەی بەستەرێکی نوێی ڕاستەوخۆت بۆ بنێرن.</p>
+            </div>
+          )}
+
           <button
             onClick={onLogout}
-            className="w-full py-3 bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] rounded-2xl font-bold text-sm transition-all"
+            className="w-full py-3 bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] rounded-2xl font-bold text-xs transition-all active-scale"
           >
-            داخستن / چوونەدەرەوە
+            داخستن / گەڕانەوە
           </button>
         </div>
       </div>
@@ -241,43 +257,28 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({ customer
   const balance = activeCurrency === 'USD' ? customer.balance_usd : customer.balance_iqd;
 
   return (
-    <div dir="rtl" className={`min-h-screen font-sans antialiased flex flex-col pb-safe transition-colors duration-200 ${
-      isDarkMode ? 'bg-black text-[#F5F5F7]' : 'bg-[#F2F2F7] text-[#1C1C1E]'
-    }`}>
+    <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] font-sans antialiased flex flex-col pb-safe">
       
       {/* Top Header */}
-      <header className={`sticky top-0 z-30 backdrop-blur-md border-b px-4 py-4 flex items-center justify-between transition-colors duration-200 ${
-        isDarkMode ? 'bg-[#1C1C1E]/90 border-[#2C2C2E]' : 'bg-white/90 border-[#E5E5EA]'
-      }`}>
+      <header className="sticky top-0 z-30 bg-[#1C1C1E]/90 backdrop-blur-md border-b border-[#2C2C2E] px-4 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center font-extrabold text-base">
             {customer.name.charAt(0)}
           </div>
           <div className="flex flex-col">
-            <h1 className={`text-sm font-extrabold flex items-center gap-1.5 ${isDarkMode ? 'text-[#F5F5F7]' : 'text-[#1C1C1E]'}`}>
+            <h1 className="text-sm font-extrabold text-[#F5F5F7] flex items-center gap-1.5">
               <span>{customer.name}</span>
               <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-bold">کڕیار</span>
             </h1>
-            <span className={`text-xs ${isDarkMode ? 'text-[#8E8E93]' : 'text-[#6C6C70]'} dir-ltr text-right`}>{customer.phone}</span>
+            <span className="text-xs text-[#8E8E93] dir-ltr text-right">{customer.phone}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            className={`p-2.5 rounded-xl transition-colors ${
-              isDarkMode ? 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7]' : 'bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1C1C1E]'
-            }`}
-            title="گۆڕینی دۆخ (ڕووناک / تاریک)"
-          >
-            {isDarkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-purple-600" />}
-          </button>
-          <button
             onClick={fetchCustomerData}
             disabled={isRefreshing}
-            className={`p-2.5 rounded-xl transition-colors ${
-              isDarkMode ? 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7]' : 'bg-[#E5E5EA] hover:bg-[#D1D1D6] text-[#1C1C1E]'
-            }`}
+            className="p-2.5 rounded-xl bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] transition-colors"
             title="نوێکردنەوە"
           >
             <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />

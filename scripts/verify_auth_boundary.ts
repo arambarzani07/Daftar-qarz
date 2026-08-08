@@ -1,3 +1,4 @@
+process.env.NO_SERVER_LISTEN = 'true';
 import crypto from 'crypto';
 import express from 'express';
 import { extractBearerToken, verifySupabaseAccessToken, isActorPlatformOwner, verifyTenantActor } from '../server';

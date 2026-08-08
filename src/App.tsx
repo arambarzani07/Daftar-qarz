@@ -24,6 +24,7 @@ import { AddCustomerSheet } from './components/AddCustomerSheet';
 import { SearchHeader } from './components/SearchHeader';
 import { SearchFiltersSheet } from './components/SearchFiltersSheet';
 import { SettingsScreen } from './components/SettingsScreen';
+import { OnboardingTour } from './components/OnboardingTour';
 import { CustomerStatementModal } from './components/CustomerStatementModal';
 import { CustomerAdvancedProfileModal } from './components/CustomerAdvancedProfileModal';
 import { CustomerDebtCard } from './components/CustomerDebtCard';
@@ -32,6 +33,10 @@ import { CustomerPortalView } from './components/CustomerPortalView';
 import { EditTransactionModal } from './components/EditTransactionModal';
 import { PrintStatementPage } from './components/PrintStatementPage';
 import { CustomerCreditStatusBanner } from './components/CustomerCreditStatusBanner';
+import { ApprovalsScreen } from './components/ApprovalsScreen';
+import { ProtectionScreen } from './components/ProtectionScreen';
+import { DebtAgingCard } from './components/DebtAgingCard';
+import { ShieldCheck, CheckSquare, Users, Search, UserPlus, Settings } from 'lucide-react';
 
 import { PlatformOwnerDashboard } from './components/platform/PlatformOwnerDashboard';
 
@@ -42,6 +47,7 @@ import { AuthLoadingScreen } from './components/auth/AuthLoadingScreen';
 import { RecoveryPage } from './components/auth/RecoveryPage';
 import { UpdatePasswordPage } from './components/auth/UpdatePasswordPage';
 import { ActivationPage } from './components/auth/ActivationPage';
+import { authenticatedFetch } from './utils/apiClient';
 import { supabase } from './lib/supabaseClient';
 
 function safeReplaceState(url: string) {
@@ -55,11 +61,34 @@ function safeReplaceState(url: string) {
   }
 }
 
+import { AppShell } from './mobile/AppShell';
+import { TabType } from './mobile/BottomNav';
+
 export default function App() {
   const [authStatus, setAuthStatus] = useState<'LOADING' | 'UNAUTHENTICATED' | 'AUTHENTICATED' | 'SELECT_CONTEXT' | 'ACCESS_DENIED'>('LOADING');
   const [authState, setAuthState] = useState<AuthState>({
     status: 'SIGNED_OUT',
   });
+  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+
+  const handleTabChange = (tab: TabType) => {
+    setActiveTab(tab);
+    if (tab === 'dashboard') {
+      setActiveScreen('dashboard');
+    } else if (tab === 'customers') {
+      setActiveScreen('customers');
+    } else if (tab === 'approvals') {
+      setActiveScreen('approvals');
+    } else if (tab === 'protection') {
+      setActiveScreen('protection');
+    } else if (tab === 'settings') {
+      setActiveScreen('settings');
+    } else if (tab === 'control_plane') {
+      setActiveScreen('control_plane');
+    } else {
+      setActiveScreen('home');
+    }
+  };
 
   const path = typeof window !== 'undefined' ? window.location.pathname : '/';
   const publicMatch = path.match(/^\/(?:b|balance|customer-balance)\/([a-zA-Z0-9_-]+)/);
@@ -279,6 +308,7 @@ export default function App() {
   const [summary, setSummary] = useState<MarketSummary | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState<number>(0);
 
   // UI & Loading State
   const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
@@ -294,6 +324,7 @@ export default function App() {
   const [isSearchFiltersOpen, setIsSearchFiltersOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isEditTransactionOpen, setIsEditTransactionOpen] = useState(false);
+  const [isTourOpen, setIsTourOpen] = useState(false);
 
   // Search & Filter State
   const [searchQuery, setSearchQuery] = useState('');
@@ -302,33 +333,20 @@ export default function App() {
 
   // API Fetch helper with X-Market-ID header injection
   const apiFetch = useCallback(async (url: string, options: RequestInit = {}) => {
-    const activeCtxStr = localStorage.getItem('zhirox_active_context');
+    const activeCtxStr = typeof window !== 'undefined' ? localStorage.getItem('zhirox_active_context') : null;
     let marketId = '';
     if (activeCtxStr) {
       try {
         const parsed = JSON.parse(activeCtxStr);
-        marketId = parsed.tenant_id || '';
+        marketId = parsed.tenant_id || parsed.market_id || parsed.marketId || '';
       } catch (e) {}
-    } else if (authState.activeContext?.tenant_id) {
+    }
+    if (!marketId && authState.activeContext?.tenant_id) {
       marketId = authState.activeContext.tenant_id;
     }
 
-    if (!marketId && authState.activeContext?.role !== 'PLATFORM_OWNER') {
-      marketId = '';
-    }
-
-    const rawToken = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
-    const token = rawToken ? rawToken.replace(/[^a-zA-Z0-9_\-.]/g, '').trim() : '';
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      ...(options.headers as Record<string, string> || {})
-    };
-    if (marketId && marketId !== 'SYSTEM_GLOBAL') {
-      headers['X-Market-ID'] = marketId;
-    }
-    return fetch(url, { ...options, headers });
-  }, [authState.activeContext]);
+    return authenticatedFetch(url, options);
+  }, []);
 
   // Fetch Market Summary
   const loadSummary = useCallback(async () => {
@@ -340,6 +358,9 @@ export default function App() {
       const json = JSON.parse(text);
       if (json && json.status === 'success') {
         setSummary(json.data);
+        if (typeof json.data.pending_approvals_count === 'number') {
+          setPendingApprovalsCount(json.data.pending_approvals_count);
+        }
       }
     } catch (err) {
       console.error('Failed to load summary:', err);
@@ -423,7 +444,28 @@ export default function App() {
     }
     loadSummary();
     loadCustomers();
+    if (typeof window !== 'undefined') {
+      const completed = localStorage.getItem('zhirox_onboarding_completed');
+      if (!completed) {
+        setIsTourOpen(true);
+      }
+    }
   }, [authStatus, authState.activeContext?.role, loadSummary, loadCustomers]);
+
+  // Auto reload on offline queue sync completion
+  useEffect(() => {
+    const handleSyncRefresh = () => {
+      loadSummary();
+      loadCustomers();
+      if (selectedCustomer) {
+        loadCustomerTransactions(selectedCustomer.id);
+      }
+    };
+    window.addEventListener('zhirox-refresh-data', handleSyncRefresh);
+    return () => {
+      window.removeEventListener('zhirox-refresh-data', handleSyncRefresh);
+    };
+  }, [loadSummary, loadCustomers, loadCustomerTransactions, selectedCustomer]);
 
   // Handle Refresh Action
   const handleRefresh = async () => {
@@ -665,15 +707,22 @@ export default function App() {
   const canReceivePayment = isManager || !!(authState.activeContext?.permissions?.includes('RECEIVE_PAYMENT'));
 
   return (
-    <div dir="rtl" className="min-h-screen bg-black text-[#F5F5F7] font-sans antialiased flex flex-col">
-
-      
-      {/* 1. HOME SCREEN */}
-      {activeScreen === 'home' && (
+    <AppShell
+      activeTab={activeTab}
+      onTabChange={handleTabChange}
+      userRole={authState.activeContext?.role}
+      marketName={summary?.market_name || authState.activeContext?.tenant_name || summary?.settings?.market_name}
+      showTopBar={activeScreen !== 'customer_profile'}
+      showBottomNav={activeScreen !== 'customer_profile'}
+      showBack={activeScreen === 'search' || activeScreen === 'settings' || activeScreen === 'approvals' || activeScreen === 'protection'}
+      onBack={() => handleTabChange('dashboard')}
+      pendingApprovalsCount={pendingApprovalsCount}
+    >
+      {/* 1. DASHBOARD / HOME SCREEN */}
+      {(activeScreen === 'dashboard' || activeScreen === 'home') && (
         <div className="flex-1 flex flex-col">
           {/* Top Header */}
           <TopActionBar
-            marketName={authState.activeContext?.tenant_name || summary?.market_name || summary?.settings?.market_name}
             onRefresh={handleRefresh}
             onAddCustomer={() => {
               if (!canAddCustomer) {
@@ -682,8 +731,9 @@ export default function App() {
               }
               setIsAddCustomerOpen(true);
             }}
+            onStartTour={() => setIsTourOpen(true)}
             onOpenSearch={() => setActiveScreen('search')}
-            onOpenSettings={() => setActiveScreen('settings')}
+            onOpenSettings={() => handleTabChange('settings')}
             isRefreshing={isRefreshing}
             canAddCustomer={canAddCustomer}
           />
@@ -695,7 +745,113 @@ export default function App() {
             customerCount={summary?.customer_count || customers.length}
           />
 
-          {/* Customer Debt List */}
+          {/* Debt Aging Analysis Card */}
+          <DebtAgingCard
+            onSelectCustomer={(id) => {
+              loadCustomerTransactions(id);
+              setActiveScreen('customer_profile');
+            }}
+          />
+
+          {/* Dashboard Quick Navigation Hub */}
+          <div className="px-4 py-3 max-w-md mx-auto w-full space-y-3.5">
+            {/* Quick Navigation Header */}
+            <div className="flex items-center justify-between px-1 pt-1">
+              <h2 className="text-xs font-bold text-[#8E8E93]">بەشەکانی سیستەم</h2>
+              <span className="text-[10px] text-[#8E8E93] font-medium">پەڕەی دەستگەیشتنی خێرا</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              {/* Customers List Button */}
+              <button
+                onClick={() => handleTabChange('customers')}
+                className="bg-[#1C1C1E] border border-[#2C2C2E] hover:border-emerald-500/40 p-3.5 rounded-2xl flex flex-col justify-between text-right transition-all active:scale-95 group h-24 shadow-sm"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    {summary?.customer_count || customers.length}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-xs font-black text-white block">لیستی کڕیاران</span>
+                  <span className="text-[10px] text-[#8E8E93]">بینینی هەموو قەرزەکان</span>
+                </div>
+              </button>
+
+              {/* Approvals Button */}
+              <button
+                onClick={() => handleTabChange('approvals')}
+                className="bg-[#1C1C1E] border border-[#2C2C2E] hover:border-emerald-500/40 p-3.5 rounded-2xl flex flex-col justify-between text-right transition-all active:scale-95 group h-24 shadow-sm"
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                    <CheckSquare className="w-4 h-4" />
+                  </div>
+                  {pendingApprovalsCount > 0 && (
+                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                      {pendingApprovalsCount}
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <span className="text-xs font-black text-white block">پەسەندکردنەکان</span>
+                  <span className="text-[10px] text-[#8E8E93]">{pendingApprovalsCount} داواکاری هەڵپەسێردراو</span>
+                </div>
+              </button>
+
+              {/* Financial Protection Button */}
+              <button
+                onClick={() => handleTabChange('protection')}
+                className="bg-[#1C1C1E] border border-[#2C2C2E] hover:border-emerald-500/40 p-3.5 rounded-2xl flex flex-col justify-between text-right transition-all active:scale-95 group h-24 shadow-sm"
+              >
+                <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+                  <ShieldCheck className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-black text-white block">ئاسایشی دارایی</span>
+                  <span className="text-[10px] text-[#8E8E93]">پاراستنی سەرمایە</span>
+                </div>
+              </button>
+
+              {/* Settings Button */}
+              <button
+                onClick={() => handleTabChange('settings')}
+                className="bg-[#1C1C1E] border border-[#2C2C2E] hover:border-emerald-500/40 p-3.5 rounded-2xl flex flex-col justify-between text-right transition-all active:scale-95 group h-24 shadow-sm"
+              >
+                <div className="w-8 h-8 rounded-xl bg-[#2C2C2E] flex items-center justify-center text-[#8E8E93] group-hover:text-emerald-400 transition-colors">
+                  <Settings className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="text-xs font-black text-white block">ڕێکخستنەکان</span>
+                  <span className="text-[10px] text-[#8E8E93]">ڕێکخستنی سیستەم و مارکێت</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. CUSTOMERS SCREEN */}
+      {activeScreen === 'customers' && (
+        <div className="flex-1 flex flex-col">
+          <TopActionBar
+            onRefresh={handleRefresh}
+            onAddCustomer={() => {
+              if (!canAddCustomer) {
+                alert('تۆ دەسەڵاتی زیادکردنی کڕیاری نوێت نییە');
+                return;
+              }
+              setIsAddCustomerOpen(true);
+            }}
+            onOpenSearch={() => setActiveScreen('search')}
+            onOpenSettings={() => handleTabChange('settings')}
+            isRefreshing={isRefreshing}
+            canAddCustomer={canAddCustomer}
+          />
+
           <CustomerList
             customers={customers}
             onSelectCustomer={handleSelectCustomer}
@@ -715,6 +871,24 @@ export default function App() {
             canAddCustomer={canAddCustomer}
           />
         </div>
+      )}
+
+      {/* 3. APPROVALS SCREEN */}
+      {activeScreen === 'approvals' && (
+        <ApprovalsScreen
+          marketId={authState.activeContext?.tenant_id || summary?.market_id || 'market-1'}
+          apiFetch={apiFetch}
+          onRefreshNeeded={loadSummary}
+        />
+      )}
+
+      {/* 4. PROTECTION SCREEN */}
+      {activeScreen === 'protection' && (
+        <ProtectionScreen
+          marketId={authState.activeContext?.tenant_id || summary?.market_id || 'market-1'}
+          apiFetch={apiFetch}
+          onRefreshNeeded={loadSummary}
+        />
       )}
 
       {/* 2. CUSTOMER PROFILE SCREEN ("FINANCIAL CHAT") */}
@@ -888,6 +1062,7 @@ export default function App() {
           defaultSort={currentSort}
           onUpdateDefaultSort={(s) => setCurrentSort(s)}
           onLogout={signOut}
+          onStartTour={() => setIsTourOpen(true)}
           userRole={authState.activeContext?.role}
           userPermissions={authState.activeContext?.permissions}
         />
@@ -901,6 +1076,19 @@ export default function App() {
         isSubmitting={isSubmitting}
       />
 
-    </div>
+      {/* ONBOARDING QUICK TOUR OVERLAY */}
+      <OnboardingTour
+        isOpen={isTourOpen}
+        onClose={() => setIsTourOpen(false)}
+        onOpenAddCustomer={() => {
+          if (!canAddCustomer) {
+            alert('تۆ دەسەڵاتی زیادکردنی کڕیاری نوێت نییە');
+            return;
+          }
+          setIsAddCustomerOpen(true);
+        }}
+      />
+
+    </AppShell>
   );
 }

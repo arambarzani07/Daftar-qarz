@@ -43,11 +43,15 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
   const [editLatinName, setEditLatinName] = useState(customer.latin_name || '');
   const [editPhone, setEditPhone] = useState(customer.phone || '');
   const [editWhatsapp, setEditWhatsapp] = useState(customer.whatsapp || '');
+  const [editTelegramUsername, setEditTelegramUsername] = useState(customer.telegram_username || '');
+  const [editTelegramChatId, setEditTelegramChatId] = useState(customer.telegram_chat_id || '');
   const [editAddress, setEditAddress] = useState(customer.address || '');
   const [editNotes, setEditNotes] = useState(customer.notes || '');
   const [editStatus, setEditStatus] = useState<'ACTIVE' | 'INACTIVE' | 'ARCHIVED'>(customer.status || 'ACTIVE');
   const [editAvatarUrl, setEditAvatarUrl] = useState<string>(customer.avatar_url || '');
   const [savingInfo, setSavingInfo] = useState(false);
+  const [sendingTelegramReminder, setSendingTelegramReminder] = useState(false);
+  const [telegramSendResult, setTelegramSendResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Live Camera capture state
   const [showLiveCameraModal, setShowLiveCameraModal] = useState(false);
@@ -241,6 +245,8 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
         setEditLatinName(c.latin_name || '');
         setEditPhone(c.phone || '');
         setEditWhatsapp(c.whatsapp || '');
+        setEditTelegramUsername(c.telegram_username || '');
+        setEditTelegramChatId(c.telegram_chat_id || '');
         setEditAddress(c.address || '');
         setEditNotes(c.notes || '');
         setEditStatus(c.status || 'ACTIVE');
@@ -286,6 +292,8 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
           latin_name: editLatinName,
           phone: editPhone,
           whatsapp: editWhatsapp,
+          telegram_username: editTelegramUsername,
+          telegram_chat_id: editTelegramChatId,
           address: editAddress,
           notes: editNotes,
           status: editStatus,
@@ -963,6 +971,90 @@ export const CustomerAdvancedProfileModal: React.FC<CustomerAdvancedProfileModal
                           <option value="INACTIVE">ناچالاک</option>
                           <option value="ARCHIVED">ئەرشیڤکراو</option>
                         </select>
+                      </div>
+                    </div>
+
+                    {/* TELEGRAM SETTINGS FOR CUSTOMER */}
+                    <div className="bg-[#1C1C1E] p-3.5 rounded-xl border border-[#2C2C2E] space-y-3">
+                      <div className="flex items-center justify-between border-b border-[#2C2C2E] pb-2">
+                        <div className="flex items-center gap-2">
+                          <Send className="w-4 h-4 text-sky-400" />
+                          <span className="font-bold text-[#F5F5F7]">بەستنەوە بە بۆتی تێلیگرام (Telegram Bot)</span>
+                        </div>
+                        <span className="text-[10px] text-sky-400 font-mono">
+                          {editTelegramChatId ? 'بەستراوەتەوە ⚡' : 'نەبەستراوەتەوە'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[#8E8E93] block mb-1 text-[11px] font-bold">ئایدی تێلیگرام (@username)</label>
+                          <input
+                            type="text"
+                            dir="ltr"
+                            value={editTelegramUsername}
+                            onChange={(e) => setEditTelegramUsername(e.target.value.replace(/^@/, '').trim())}
+                            disabled={!canEditInfo}
+                            placeholder="username"
+                            style={{ direction: 'ltr', textAlign: 'left', unicodeBidi: 'plaintext' }}
+                            className={`w-full bg-[#000000] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-sky-500 font-mono ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[#8E8E93] block mb-1 text-[11px] font-bold">Chat ID (ئایدی چاتی تێلیگرام)</label>
+                          <input
+                            type="text"
+                            dir="ltr"
+                            value={editTelegramChatId}
+                            onChange={(e) => setEditTelegramChatId(e.target.value.trim())}
+                            disabled={!canEditInfo}
+                            placeholder="123456789"
+                            style={{ direction: 'ltr', textAlign: 'left', unicodeBidi: 'plaintext' }}
+                            className={`w-full bg-[#000000] border border-[#2C2C2E] rounded-xl p-2.5 text-[#F5F5F7] focus:outline-none focus:border-sky-500 font-mono ${!canEditInfo ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Manual Reminder Button */}
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          disabled={sendingTelegramReminder}
+                          onClick={async () => {
+                            setSendingTelegramReminder(true);
+                            setTelegramSendResult(null);
+                            try {
+                              const res = await authenticatedFetch('/api/telegram/send-reminder', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ customer_id: customer.id })
+                              });
+                              const json = await res.json();
+                              if (json.status === 'success') {
+                                setTelegramSendResult({ success: true, message: json.message });
+                              } else {
+                                setTelegramSendResult({ success: false, message: json.message || 'نەنێردرا' });
+                              }
+                            } catch (err: any) {
+                              setTelegramSendResult({ success: false, message: 'خەتای پەیوەندی سێرڤەر' });
+                            } finally {
+                              setSendingTelegramReminder(false);
+                            }
+                          }}
+                          className="w-full py-2 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 font-bold rounded-xl text-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>ناردنی ئاگاداری/بیرخستنەوەی دەستکرد بۆ تێلیگرامی ئەم کڕیارە</span>
+                        </button>
+
+                        {telegramSendResult && (
+                          <div className={`mt-2 p-2.5 rounded-xl text-xs font-bold text-center ${
+                            telegramSendResult.success ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                          }`}>
+                            {telegramSendResult.message}
+                          </div>
+                        )}
                       </div>
                     </div>
 

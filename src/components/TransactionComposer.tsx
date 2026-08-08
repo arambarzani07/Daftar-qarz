@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CurrencyType } from '../types';
 import { formatMoney } from '../utils/formatters';
-import { ChevronUp, ChevronDown, PlusCircle, ArrowDownCircle, Tag, Sparkles, Check, DollarSign, Lock } from 'lucide-react';
+import { ChevronUp, ChevronDown, PlusCircle, ArrowDownCircle, Tag, Sparkles, Check, DollarSign, Lock, Mic, MicOff } from 'lucide-react';
 
 interface TransactionComposerProps {
   balanceIqd: number;
@@ -50,6 +50,106 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
   const [aiText, setAiText] = useState('');
   const [isAiParsing, setIsAiParsing] = useState(false);
   const [aiSuccessMessage, setAiSuccessMessage] = useState('');
+
+  // Voice Dictation (Speech-to-Text) States
+  const [isListening, setIsListening] = useState(false);
+  const [listeningTarget, setListeningTarget] = useState<'note' | 'ai'>('note');
+  const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (_) {}
+      }
+    };
+  }, []);
+
+  const toggleVoiceDictation = (target: 'note' | 'ai' = 'note') => {
+    setErrorMessage('');
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setErrorMessage('وێبگەڕەکەت پشتگیری تۆمارکردنی دەنگ ناکات (تکایە Chrome یان Safari بەکاربهێنە)');
+      return;
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (_) {}
+      }
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognitionRef.current = recognition;
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = 'ckb-IQ'; // Kurdish Sorani Speech Recognition
+
+      setListeningTarget(target);
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event: any) => {
+        let currentTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          currentTranscript += event.results[i][0].transcript;
+        }
+
+        if (target === 'ai') {
+          setAiText(currentTranscript);
+        } else {
+          setNote(currentTranscript);
+
+          // Auto-detect numbers in speech and set amount if present
+          const numbers = currentTranscript.match(/\d+/g);
+          if (numbers && numbers.length > 0) {
+            const numVal = parseInt(numbers.join(''), 10);
+            if (!isNaN(numVal) && numVal > 0) {
+              setAmount(numVal.toLocaleString('en-US'));
+            }
+          }
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        setIsListening(false);
+        const errType = event?.error || '';
+        if (errType === 'service-not-allowed' || errType === 'not-allowed' || errType === 'network') {
+          setErrorMessage('ناسینەوەی دەنگ لە ناو چوارچێوەی preview کارانابێت. تکایە بەرنامەکە لە پەڕەیەکی نوێدا بکەرەوە (New Tab) بۆ بەکارهێنانی تایبەتمەندی دەنگ.');
+        } else if (errType === 'no-speech') {
+          setErrorMessage('هیچ دەنگێک نەبیسترا، تکایە دووبارە دەنگ تۆماربکەرەوە.');
+        } else {
+          setErrorMessage('سیستەمی ناسینەوەی دەنگ لەم وێبگەڕەدا بێچالاکە.');
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      try {
+        recognition.start();
+      } catch (startErr: any) {
+        console.error('Failed to start speech recognition:', startErr);
+        setIsListening(false);
+        setErrorMessage('ناسینەوەی دەنگ دەستپێنەکرا. تکایە بەرنامەکە لە پەڕەیەکی نوێ (New Tab) بکەرەوە.');
+      }
+    } catch (err: any) {
+      console.error('Voice dictation error:', err);
+      setErrorMessage('تۆمارکردنی دەنگ دەستپێنەکرا');
+      setIsListening(false);
+    }
+  };
 
   const handleAiParse = async () => {
     if (!aiText.trim()) {
@@ -194,6 +294,15 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
             {errorMessage && (
               <div className="bg-red-950/80 border border-red-800/60 text-red-200 text-xs p-3 rounded-xl text-center space-y-2 font-bold">
                 <div>{errorMessage}</div>
+                {(errorMessage.includes('New Tab') || errorMessage.includes('پەڕەیەکی نوێ')) && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(window.location.href, '_blank')}
+                    className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-black rounded-lg transition-all shadow-md active:scale-95 inline-flex items-center gap-1.5 mx-auto"
+                  >
+                    <span>کردنەوە لە پەڕەیەکی نوێ (Open in New Tab)</span>
+                  </button>
+                )}
                 {(errorMessage.includes('سنوور') || errorMessage.includes('تێدەپەڕێت') || errorMessage.includes('پەسەندکردن')) && (
                   <button
                     type="button"
@@ -227,12 +336,30 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
                   <p className="text-[10px] text-[#8E8E93] leading-relaxed">
                     لیستی شتومەک یان داواکاری کڕیار لێرە بنووسە، سیستەمەکە خۆی نرخەکان کۆدەکاتەوە و تێبینی ڕێکدەخات.
                   </p>
-                  <textarea
-                    value={aiText}
-                    onChange={(e) => setAiText(e.target.value)}
-                    placeholder="نموونە: ٣ کارت کۆڕەک بە ١٥٠٠٠ و یەک کارت ئاسیا بە ٥٠٠٠"
-                    className="w-full bg-black text-[#F5F5F7] text-xs p-2.5 rounded-xl border border-[#3A3A3C] focus:outline-none focus:border-emerald-500 placeholder-[#8E8E93]/40 min-h-[60px] dir-rtl resize-none"
-                  />
+                  <div className="relative">
+                    <textarea
+                      value={aiText}
+                      onChange={(e) => setAiText(e.target.value)}
+                      placeholder="نموونە: ٣ کارت کۆڕەک بە ١٥٠٠٠ و یەک کارت ئاسیا بە ٥٠٠٠"
+                      className="w-full bg-black text-[#F5F5F7] text-xs p-2.5 pl-10 rounded-xl border border-[#3A3A3C] focus:outline-none focus:border-emerald-500 placeholder-[#8E8E93]/40 min-h-[60px] dir-rtl resize-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => toggleVoiceDictation('ai')}
+                      title="خوێندنەوەی دەنگ بۆ دەق (Voice to Text)"
+                      className={`absolute left-2 top-2.5 p-1.5 rounded-lg transition-all border ${
+                        isListening && listeningTarget === 'ai'
+                          ? 'bg-red-500/20 text-red-400 border-red-500/50 animate-pulse'
+                          : 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-emerald-400 border-[#3A3A3C]'
+                      }`}
+                    >
+                      {isListening && listeningTarget === 'ai' ? (
+                        <MicOff className="w-3.5 h-3.5 text-red-400" />
+                      ) : (
+                        <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </button>
+                  </div>
                   <div className="flex justify-end">
                     <button
                       type="button"
@@ -331,16 +458,41 @@ export const TransactionComposer: React.FC<TransactionComposerProps> = ({
               ))}
             </div>
 
-            {/* NOTE INPUT */}
-            <div>
-              <input
-                id="composer-note-input"
-                type="text"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="تێبینی / هۆکاری قەرز یان ژمارەی وەسڵ..."
-                className="w-full bg-black text-[#F5F5F7] text-sm p-3 rounded-2xl border border-[#2C2C2E] focus:outline-none focus:border-emerald-500 placeholder-[#8E8E93]/50 dir-rtl"
-              />
+            {/* NOTE INPUT WITH VOICE DICTATION BUTTON */}
+            <div className="space-y-1.5">
+              <div className="relative">
+                <input
+                  id="composer-note-input"
+                  type="text"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="تێبینی / هۆکاری قەرز یان ژمارەی وەسڵ..."
+                  className="w-full bg-black text-[#F5F5F7] text-sm p-3 pl-12 rounded-2xl border border-[#2C2C2E] focus:outline-none focus:border-emerald-500 placeholder-[#8E8E93]/50 dir-rtl"
+                />
+                <button
+                  type="button"
+                  onClick={() => toggleVoiceDictation('note')}
+                  title="خوێندنەوەی دەنگ بۆ دەق (Voice to Text)"
+                  className={`absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-xl transition-all border shadow-sm active:scale-95 flex items-center justify-center ${
+                    isListening && listeningTarget === 'note'
+                      ? 'bg-red-500/20 text-red-400 border-red-500/50 animate-pulse'
+                      : 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-emerald-400 border-[#3A3A3C]'
+                  }`}
+                >
+                  {isListening && listeningTarget === 'note' ? (
+                    <MicOff className="w-4 h-4 text-red-400" />
+                  ) : (
+                    <Mic className="w-4 h-4 text-emerald-400" />
+                  )}
+                </button>
+              </div>
+
+              {isListening && listeningTarget === 'note' && (
+                <div className="flex items-center gap-2 text-xs font-bold text-red-400 bg-red-950/40 border border-red-800/40 px-3 py-1.5 rounded-xl animate-pulse justify-center">
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                  <span>گوێگرتن لە دەنگ... (قسە بکە بۆ نوسینی تێبینی و بڕی پارە)</span>
+                </div>
+              )}
             </div>
 
             {/* QUICK CATEGORY / ITEM TAGS */}

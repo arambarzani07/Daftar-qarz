@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { formatMoney } from '../utils/formatters';
+import { authenticatedFetch } from '../utils/apiClient';
 import { Users, TrendingUp, Wallet, ChevronDown, ChevronUp, BarChart3, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 
@@ -35,38 +36,9 @@ export const FinancialSummaryCard: React.FC<FinancialSummaryCardProps> = ({
     const fetchAnalytics = async () => {
       setIsLoadingChart(true);
       try {
-        const token = typeof window !== 'undefined' ? localStorage.getItem('zhirox_session_token') : null;
-        const activeCtxStr = typeof window !== 'undefined' ? localStorage.getItem('zhirox_active_context') : null;
-        let marketId = '';
-        if (activeCtxStr) {
-          try {
-            const parsed = JSON.parse(activeCtxStr);
-            marketId = parsed.tenant_id || parsed.market_id || '';
-          } catch (e) {}
-        }
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json'
-        };
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-        if (marketId && marketId !== 'SYSTEM_GLOBAL') {
-          headers['X-Market-ID'] = marketId;
-        }
-
-        let url = '/api/analytics/30days';
-        try {
-          if (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin.startsWith('http')) {
-            url = `${window.location.origin}/api/analytics/30days`;
-          }
-        } catch (e) {}
-
-        const res = await fetch(url, { headers });
-        const text = await res.text();
-        let json: any = {};
-        try {
-          json = JSON.parse(text);
-        } catch (e) {}
+        const res = await authenticatedFetch('/api/analytics/30days');
+        if (!res.ok) return;
+        const json = await res.json();
         if (isMounted && json.status === 'success' && Array.isArray(json.data)) {
           setAnalyticsData(json.data);
         }
@@ -127,31 +99,48 @@ export const FinancialSummaryCard: React.FC<FinancialSummaryCardProps> = ({
         </div>
 
         {/* ROW 1: لەقەرزدایە & TREND CHART TOGGLE */}
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col">
-            <span className="text-xs text-[#8E8E93] font-bold mb-0.5">کۆی گشتی لەقەرزدایە:</span>
-            <span className="text-lg sm:text-xl font-black text-emerald-400 tracking-tight">
-              {formatMoney(totalIqd, 'IQD')}
-            </span>
-            {totalUsd > 0 && (
-              <span className="text-xs font-extrabold text-[#F5F5F7] mt-0.5">
-                {formatMoney(totalUsd, 'USD')}
-              </span>
-            )}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-[#8E8E93] font-bold">کۆی گشتی لەقەرزدایە:</span>
+            <button
+              onClick={() => setShowTrendChart(!showTrendChart)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all border shadow-sm active:scale-95 ${
+                showTrendChart
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] border-[#3A3A3C]'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
+              <span>ئاراستەی 30 ڕۆژ</span>
+              {showTrendChart ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
           </div>
 
-          <button
-            onClick={() => setShowTrendChart(!showTrendChart)}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-extrabold transition-all border shadow-sm active:scale-95 ${
-              showTrendChart
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                : 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-[#F5F5F7] border-[#3A3A3C]'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4 text-emerald-400" />
-            <span>ئاراستەی 30 ڕۆژ</span>
-            {showTrendChart ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="bg-[#2C2C2E]/60 border border-[#3A3A3C] p-3 rounded-xl flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-[#8E8E93] font-extrabold block">قەرزی دینار (IQD)</span>
+                <span className="text-base sm:text-lg font-black text-emerald-400 tracking-tight">
+                  {formatMoney(totalIqd, 'IQD')}
+                </span>
+              </div>
+              <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                عێراقی
+              </span>
+            </div>
+
+            <div className="bg-[#2C2C2E]/60 border border-[#3A3A3C] p-3 rounded-xl flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-[#8E8E93] font-extrabold block">قەرزی دۆلار (USD)</span>
+                <span className="text-base sm:text-lg font-black text-emerald-400 tracking-tight">
+                  {formatMoney(totalUsd, 'USD')}
+                </span>
+              </div>
+              <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                دۆلار
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* EXPANDABLE RECHARTS DEBT TREND ANALYSIS SECTION */}

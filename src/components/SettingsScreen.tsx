@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { AppSettings, SortOption } from '../types';
 import { StaffManagementModal } from './StaffManagementModal';
+import { authenticatedFetch } from '../utils/apiClient';
+import { useOfflineQueue } from '../lib/useOfflineQueue';
 import {
   User,
   Users,
@@ -25,8 +27,18 @@ import {
   Moon,
   Database,
   Server,
-  Wifi,
-  Cloud
+  Send,
+  Bot,
+  Bell,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  WifiOff,
+  Trash2,
+  RefreshCw,
+  Download,
+  HardDrive,
+  FileJson
 } from 'lucide-react';
 
 interface SettingsScreenProps {
@@ -36,6 +48,7 @@ interface SettingsScreenProps {
   defaultSort: SortOption;
   onUpdateDefaultSort: (sort: SortOption) => void;
   onLogout?: () => Promise<void> | void;
+  onStartTour?: () => void;
   userRole?: string;
   userPermissions?: string[];
 }
@@ -47,25 +60,70 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   defaultSort,
   onUpdateDefaultSort,
   onLogout,
+  onStartTour,
   userRole,
   userPermissions
 }) => {
   const isManager = userRole === 'MARKET_MANAGER' || !userRole; // Default to true if not specified for backward compatibility
 
+  const { queue, queuedCount, isSyncing, syncNow, clearQueue, removeRequest } = useOfflineQueue();
+
   const [activeModal, setActiveModal] = useState<
-    'ACCOUNT' | 'STAFF' | 'MODE' | 'TUTORIAL' | 'PIN' | 'PASSWORD' | 'LANGUAGE' | 'SORT' | 'CONTACT' | 'LOGOUT' | 'DATABASE' | 'OFFLINE' | 'BACKUP' | null
+    'ACCOUNT' | 'STAFF' | 'MODE' | 'TUTORIAL' | 'PIN' | 'PASSWORD' | 'LANGUAGE' | 'SORT' | 'CONTACT' | 'LOGOUT' | 'DATABASE' | 'IOS_APP' | 'TELEGRAM_BOT' | 'OFFLINE_QUEUE' | 'BACKUP' | null
   >(null);
 
-  // Offline Sync state
-  const [isOfflineSyncActive, setIsOfflineSyncActive] = useState(true);
-  const [pendingSyncItems, setPendingSyncItems] = useState(0);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncText, setLastSyncText] = useState('ئێستا (Active & Synced)');
+  // Backup Data Download States
+  const [isDownloadingBackup, setIsDownloadingBackup] = useState(false);
+  const [backupSuccess, setBackupSuccess] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
 
-  // Cloud Backup Vault state
-  const [backupVaultStatus, setBackupVaultStatus] = useState<'SECURED' | 'SYNCING'>('SECURED');
-  const [lastBackupText, setLastBackupText] = useState('ئەمڕۆ کاتژمێر 12:00 (Auto-Sync)');
-  const [isBackingUp, setIsBackingUp] = useState(false);
+  const handleDownloadBackup = async () => {
+    setIsDownloadingBackup(true);
+    setBackupSuccess(null);
+    setBackupError(null);
+
+    try {
+      const res = await authenticatedFetch('/api/market/backup');
+      if (!res.ok) {
+        throw new Error(`خەتای سێرڤەر (${res.status})`);
+      }
+      const data = await res.json();
+      if (data.status === 'success' && data.snapshot) {
+        const jsonStr = JSON.stringify(data.snapshot, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = data.filename || `zhirox-backup-${Date.now()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        const custCount = data.snapshot.summary?.total_customers ?? 0;
+        const txCount = data.snapshot.summary?.total_transactions ?? 0;
+        setBackupSuccess(`فایلی پاشەکەوت بە سەرکەوتوویی دابەزێنرا! (${custCount} کڕیار، ${txCount} مامەڵە)`);
+      } else {
+        throw new Error(data.message || 'خەتایەک لە دروستکردنی فایلی پاشەکەوتدا ڕوویدا');
+      }
+    } catch (err: any) {
+      console.error('Failed to download backup snapshot:', err);
+      setBackupError(err.message || 'پەیوەندی نەکرا بە سێرڤەرەوە');
+    } finally {
+      setIsDownloadingBackup(false);
+    }
+  };
+
+  // Telegram Bot Integration States
+  const [telegramToken, setTelegramToken] = useState(settings.telegram_bot_token || '');
+  const [telegramBotUser, setTelegramBotUser] = useState(settings.telegram_bot_username || '');
+  const [telegramEnabled, setTelegramEnabled] = useState(settings.telegram_enabled !== false);
+  const [telegramNotifyTx, setTelegramNotifyTx] = useState(settings.telegram_notify_new_tx !== false);
+  const [telegramNotifyOverdue, setTelegramNotifyOverdue] = useState(settings.telegram_notify_overdue !== false);
+  const [telegramNotifyPromises, setTelegramNotifyPromises] = useState(settings.telegram_notify_promises !== false);
+  const [testingTelegram, setTestingTelegram] = useState(false);
+  const [telegramTestResult, setTelegramTestResult] = useState<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null);
+  const [savingTelegram, setSavingTelegram] = useState(false);
 
   // Supabase Database Connection Status
   const [dbStatus, setDbStatus] = useState<{
@@ -77,7 +135,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   } | null>(null);
 
   useEffect(() => {
-    fetch('/api/database/status')
+    authenticatedFetch('/api/database/status')
       .then((res) => res.json())
       .then((json) => {
         if (json.status === 'success') {
@@ -109,6 +167,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     setPinEnabled(settings.pin_enabled || false);
     setPinCode(settings.pin_code || '1234');
     setLanguage(settings.language || 'ku');
+    setTelegramToken(settings.telegram_bot_token || '');
+    setTelegramBotUser(settings.telegram_bot_username || '');
+    setTelegramEnabled(settings.telegram_enabled !== false);
+    setTelegramNotifyTx(settings.telegram_notify_new_tx !== false);
+    setTelegramNotifyOverdue(settings.telegram_notify_overdue !== false);
+    setTelegramNotifyPromises(settings.telegram_notify_promises !== false);
   }, [settings]);
 
   // Password Form State
@@ -336,17 +400,21 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </div>
         </button>
 
-        {/* 3. Tutorial */}
+        {/* 3. Tutorial / Quick Tour */}
         <button
           onClick={() => {
-            setTutorialStep(0);
-            setActiveModal('TUTORIAL');
+            if (onStartTour) {
+              onStartTour();
+            } else {
+              setTutorialStep(0);
+              setActiveModal('TUTORIAL');
+            }
           }}
           className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
         >
           <div className="flex items-center gap-3.5">
             <HelpCircle className="w-5 h-5 text-blue-400 stroke-[1.75]" />
-            <span className="text-base font-bold text-[#F5F5F7]">فێرکاری</span>
+            <span className="text-base font-bold text-[#F5F5F7]">فێرکاری و گەشتی خێرا (Quick Tour)</span>
           </div>
           <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
         </button>
@@ -419,41 +487,79 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
         </button>
 
-        {/* Offline-First Sync Engine */}
+        {/* 8.5. iOS App / PWA Guide */}
         <button
-          onClick={() => setActiveModal('OFFLINE')}
+          onClick={() => setActiveModal('IOS_APP')}
           className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
         >
           <div className="flex items-center gap-3.5">
-            <Wifi className="w-5 h-5 text-emerald-400 stroke-[1.75]" />
-            <div className="flex flex-col items-start">
-              <span className="text-base font-bold text-[#F5F5F7]">کارکردنی بێ ئینتەرنێت (Offline-First)</span>
-              <span className="text-[11px] text-[#8E8E93]">سینکی خودکاری مامەڵەکان لە کاتی نەبوونی هێڵ</span>
-            </div>
+            <Smartphone className="w-5 h-5 text-blue-400 stroke-[1.75]" />
+            <span className="text-base font-bold text-[#F5F5F7]">دامەزراندنی ئەپ لەسەر ئایفۆن (iOS)</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
-              {pendingSyncItems > 0 ? `${pendingSyncItems} چاوڕوان` : 'ئامادە'}
+            <span className="text-xs text-blue-400 font-bold bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/20">
+              ئەپی ئایفۆن
             </span>
             <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
           </div>
         </button>
 
-        {/* Automated Cloud Backup Vault */}
+        {/* 8.6. Telegram Bot Notifications System */}
         <button
+          onClick={() => setActiveModal('TELEGRAM_BOT')}
+          className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
+        >
+          <div className="flex items-center gap-3.5">
+            <Send className="w-5 h-5 text-sky-400 stroke-[1.75]" />
+            <span className="text-base font-bold text-[#F5F5F7]">بۆتی ئۆتۆماتیکی تێلیگرام (Telegram Bot)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-md border ${
+              settings.telegram_bot_token && settings.telegram_enabled !== false
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+            }`}>
+              {settings.telegram_bot_token && settings.telegram_enabled !== false ? 'چالاکە ⚡' : 'ڕێکنەخراوە'}
+            </span>
+            <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
+          </div>
+        </button>
+
+        {/* 8.7. Offline Queue & Sync */}
+        <button
+          onClick={() => setActiveModal('OFFLINE_QUEUE')}
+          className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
+        >
+          <div className="flex items-center gap-3.5">
+            <WifiOff className="w-5 h-5 text-sky-400 stroke-[1.75]" />
+            <span className="text-base font-bold text-[#F5F5F7]">ردێن ئۆفلاین و هاوکاتکردنەوە (Offline Sync)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-md border ${
+              queuedCount > 0
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+            }`}>
+              {queuedCount > 0 ? `${queuedCount} لە ڕیزدا ⏳` : 'هاوکاتە 🟢'}
+            </span>
+            <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
+          </div>
+        </button>
+
+        {/* 8.8. Backup Data & Secure JSON Snapshot */}
+        <button
+          id="settings-backup-data-btn"
           onClick={() => setActiveModal('BACKUP')}
           className="w-full h-[68px] px-5 flex items-center justify-between active:bg-[#2C2C2E] transition-colors"
         >
           <div className="flex items-center gap-3.5">
-            <Cloud className="w-5 h-5 text-cyan-400 stroke-[1.75]" />
-            <div className="flex flex-col items-start">
-              <span className="text-base font-bold text-[#F5F5F7]">پاشەکەوتی پارێزراوی هەور (Cloud Backup)</span>
-              <span className="text-[11px] text-[#8E8E93]">هەڵگرتنی کۆپی یەدەگ لە چەند سەرڤەرێک</span>
-            </div>
+            <HardDrive className="w-5 h-5 text-emerald-400 stroke-[1.75]" />
+            <span className="text-base font-bold text-[#F5F5F7]">پاشەکەوتکردنی داتا (Backup Data)</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 font-bold">
-              پارێزراو
+            <span className="text-xs text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20 flex items-center gap-1">
+              <Download className="w-3 h-3" />
+              <span>JSON Snapshot</span>
             </span>
             <ChevronRight className="w-5 h-5 text-[#8E8E93] rotate-180" />
           </div>
@@ -1015,134 +1121,498 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </div>
       )}
 
-      {/* STAFF MANAGEMENT MODAL */}
-      <StaffManagementModal
-        isOpen={activeModal === 'STAFF'}
-        onClose={() => setActiveModal(null)}
-      />
-
-      {/* OFFLINE SYNC ENGINE MODAL */}
-      {activeModal === 'OFFLINE' && (
+      {/* ========================================================= */}
+      {/* IOS APP & PWA INSTALLATION MODAL */}
+      {/* ========================================================= */}
+      {activeModal === 'IOS_APP' && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
-          <div className="w-full max-w-sm bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in">
+          <div className="w-full max-w-sm bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in text-right dir-rtl max-h-[85vh] overflow-y-auto">
+            
             <div className="flex items-center justify-between pb-2 border-b border-[#2C2C2E]">
               <div className="flex items-center gap-2">
-                <Wifi className="w-5 h-5 text-emerald-400" />
-                <span className="font-bold text-[#F5F5F7]">کارکردنی بێ ئینتەرنێت (Offline-First)</span>
+                <Smartphone className="w-5 h-5 text-blue-400" />
+                <span className="font-bold text-[#F5F5F7] text-sm">دامەزراندنی ئەپ لەسەر ئایفۆن (iOS)</span>
               </div>
               <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7]">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <p className="text-xs text-[#8E8E93] leading-relaxed">
-              سیستەمی ئۆفلاین ڕێگەت پێدەدات لە کاتی پچڕانی هێڵی ئینتەرنێت، مامەڵەکان بە بێ کێشە تۆمار بکەیت و پاش گەڕانەوەی هێڵەکە، بە شێوەی خۆکار سینک دەبنەوە.
-            </p>
+            <div className="bg-blue-500/10 border border-blue-500/30 p-3 rounded-xl text-blue-300 text-xs leading-relaxed space-y-1">
+              <span className="font-extrabold block text-blue-400">⚡ پێویستت بە فایلی IPA یان App Store نییە!</span>
+              <p>
+                ئەم سیستەمە پشتگیری کامل لە <strong>iOS Web App (PWA)</strong> دەکات. دەتوانیت ڕاستەوخۆ وەک ئەپێکی ڕەسەنی ئایفۆن (Native App) بێ سنوور بەکاری بهێنیت.
+              </p>
+            </div>
 
-            <div className="bg-black border border-[#2C2C2E] rounded-xl p-3.5 flex flex-col gap-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">دۆخی هێڵ (Connection Status):</span>
-                <span className="text-emerald-400 font-bold flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  ئامادە و کارا (Online / Synced)
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">مامەڵە چاوڕوانکراوەکان (Queue):</span>
-                <span className="text-[#F5F5F7] font-bold">{pendingSyncItems} مامەڵە</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">دوایین سینک:</span>
-                <span className="text-[#F5F5F7] font-mono text-[11px]">{lastSyncText}</span>
+            <div className="space-y-3 text-xs text-[#F5F5F7]">
+              <h4 className="font-bold text-amber-400">هەنگاوەکانی دامەزراندن لەسەر ئایفۆن (iPhone / iPad):</h4>
+              
+              <div className="bg-[#2C2C2E] p-3 rounded-xl space-y-2 border border-[#3A3A3C]">
+                <div className="flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-500 text-black font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5">١</span>
+                  <span>لەنێو وێبگەڕی <strong>Safari</strong> لەسەر ئایفۆنەکەت ئەم بەستەرە بکەرەوە.</span>
+                </div>
+
+                <div className="flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-500 text-black font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5">٢</span>
+                  <span>دابگرە لەسەر دوگمەی <strong>بەشکردن (Share)</strong> لە ژێرەوەی لاپەڕەکە (ئایکۆنی چوارگۆشە بە تیری ڕوو بە سەرەوە 📤).</span>
+                </div>
+
+                <div className="flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-500 text-black font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5">٣</span>
+                  <span>هەڵبژێرە: <strong>«زیادکردن بۆ شاشەی سەرەکی»</strong> یان <strong>«Add to Home Screen»</strong> (+).</span>
+                </div>
+
+                <div className="flex items-start gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-500 text-black font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5">٤</span>
+                  <span>ئایکۆنی <strong>ZHIROX</strong> دەکەوێتە سەر شاشەی ئایفۆنەکەت و بە تەواوی شاشە (Full Screen) دەکرێتەوە!</span>
+                </div>
               </div>
             </div>
 
+            <div className="bg-[#252528] border border-[#3A3A3C] p-3 rounded-xl space-y-1 text-[11px] text-[#8E8E93]">
+              <span className="font-bold text-[#F5F5F7] block">تێبینی ڕوونکردنەوە لەسەر فایلی IPA:</span>
+              <p>
+                دروستکردنی فایلی IPA ڕاستەوخۆ پێویستی بە جێبەجێکردن لەسەر کۆمپیوپەری Mac و ڕاھێنانی Xcode بە هەژماری Apple Developer هەیە. ئەگەر دەتەوێت کۆدەکەی بۆ Xcode بپێچیتەوە، دەتوانیت پرۆژەکە له Menu Export (یان GitHub) دابگریت و بە <strong>Capacitor (`npx cap add ios`)</strong> بیکەیتە فایلی IPA.
+              </p>
+            </div>
+
             <button
-              onClick={() => {
-                setIsSyncing(true);
-                setTimeout(() => {
-                  setIsSyncing(false);
-                  setPendingSyncItems(0);
-                  setLastSyncText('ئێستا (Manual Synced)');
-                  showToast('سینککردنەوە بە سەرکەوتوویی ئەنجامدرا');
-                }, 1000);
-              }}
-              disabled={isSyncing}
-              className="w-full py-3 bg-[#34C759] text-black font-bold text-sm rounded-xl active-scale flex items-center justify-center gap-2"
+              onClick={() => setActiveModal(null)}
+              className="w-full py-3 bg-blue-500 text-white font-bold text-sm rounded-xl active-scale shadow-lg"
             >
-              {isSyncing ? (
+              تێگەیشتم
+            </button>
+
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* TELEGRAM BOT CONFIGURATION MODAL */}
+      {/* ========================================================= */}
+      {activeModal === 'TELEGRAM_BOT' && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-md bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in text-right dir-rtl max-h-[90vh] overflow-y-auto">
+            
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-[#2C2C2E]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-sky-500/10 rounded-xl text-sky-400">
+                  <Send className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-[#F5F5F7] text-base">بۆتی تێلیگرام (Telegram Bot)</h3>
+                  <p className="text-[11px] text-[#8E8E93]">ناردنی ئاگاداری ئۆتۆماتیکی بۆ تێلیگرامی کڕیاران</p>
+                </div>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7] p-1 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Quick Setup Instructions with BotFather */}
+            <div className="bg-sky-500/10 border border-sky-500/20 p-3.5 rounded-xl text-xs space-y-2 text-sky-200">
+              <span className="font-extrabold text-sky-400 flex items-center gap-1.5 text-sm">
+                <Bot className="w-4 h-4" /> ڕێنمایی دروستکردنی بۆتی تێلیگرام (BotFather):
+              </span>
+              <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed text-[#D1D1D6]">
+                <li>لە بەرنامەی <strong>Telegram</strong> گەڕان بکە بۆ هەژماری ڕەسمیی <strong>@BotFather</strong></li>
+                <li>فەرمانی <strong>/newbot</strong> بنێرە و ناو و یوزەرنەیەک بۆ بۆتەکەت هەڵبژێرە.</li>
+                <li>تۆکنی <strong>HTTP API Token</strong> کۆپی بکە و لە خوارەوە دایبنێ.</li>
+              </ol>
+            </div>
+
+            {/* Form inputs */}
+            <div className="space-y-4">
+              {/* Bot Token */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-[#8E8E93]">تۆکنی بۆت (Bot API Token) *</label>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const text = await navigator.clipboard.readText();
+                        if (text) setTelegramToken(text.trim());
+                      } catch (e) {
+                        // fallback if clipboard api is blocked
+                      }
+                    }}
+                    className="text-[11px] font-bold text-sky-400 hover:text-sky-300 bg-sky-500/10 px-2.5 py-1 rounded-lg border border-sky-500/20 flex items-center gap-1 active:scale-95 transition-all"
+                  >
+                    <span>📋 پەیست (Paste)</span>
+                  </button>
+                </div>
+                <div className="relative" dir="ltr" style={{ direction: 'ltr' }}>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={telegramToken}
+                    onChange={(e) => setTelegramToken(e.target.value.trim())}
+                    placeholder="123456789:ABCdefGhIJKlmNoPQ..."
+                    style={{ direction: 'ltr', textAlign: 'left', unicodeBidi: 'plaintext' }}
+                    className="w-full h-11 pl-3.5 pr-9 bg-[#2C2C2E] border border-[#3A3A3C] rounded-xl text-sm font-mono text-[#F5F5F7] focus:outline-none focus:border-sky-500"
+                  />
+                  {telegramToken && (
+                    <button
+                      type="button"
+                      onClick={() => setTelegramToken('')}
+                      className="absolute right-3 top-3 text-[#8E8E93] hover:text-[#F5F5F7] p-0.5"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Bot Username */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-[#8E8E93]">یوزەرنەیعی بۆت (Bot Username)</label>
+                <div className="relative" dir="ltr" style={{ direction: 'ltr' }}>
+                  <span className="absolute left-3 top-3 text-[#8E8E93] font-mono text-sm">@</span>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={telegramBotUser}
+                    onChange={(e) => setTelegramBotUser(e.target.value.replace(/^@/, '').trim())}
+                    placeholder="MyMarket_Zhirox_bot"
+                    style={{ direction: 'ltr', textAlign: 'left', unicodeBidi: 'plaintext' }}
+                    className="w-full h-11 pl-8 pr-3 bg-[#2C2C2E] border border-[#3A3A3C] rounded-xl text-sm font-mono text-[#F5F5F7] focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+              </div>
+
+              {/* Switches */}
+              <div className="bg-[#2C2C2E] p-3.5 rounded-xl space-y-3 border border-[#3A3A3C]">
+                
+                {/* Master Enable */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Bell className="w-4 h-4 text-sky-400" />
+                    <span className="text-xs font-bold text-[#F5F5F7]">چالاککردنی ئاگاداری بۆتی تێلیگرام</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={telegramEnabled}
+                    onChange={(e) => setTelegramEnabled(e.target.checked)}
+                    className="w-5 h-5 accent-sky-500 cursor-pointer"
+                  />
+                </div>
+
+                <div className="h-px bg-[#3A3A3C]" />
+
+                {/* New Transaction */}
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#D1D1D6]">ئاگاداری ئۆتۆماتیکی مامەڵەی نوێ (قەرز / دانەوە)</span>
+                  <input
+                    type="checkbox"
+                    checked={telegramNotifyTx}
+                    onChange={(e) => setTelegramNotifyTx(e.target.checked)}
+                    disabled={!telegramEnabled}
+                    className="w-4 h-4 accent-sky-500 cursor-pointer disabled:opacity-40"
+                  />
+                </div>
+
+                {/* Overdue Debt */}
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#D1D1D6]">بیرخستنەوەی ئۆتۆماتیکی قەرزی دواکەوتوو</span>
+                  <input
+                    type="checkbox"
+                    checked={telegramNotifyOverdue}
+                    onChange={(e) => setTelegramNotifyOverdue(e.target.checked)}
+                    disabled={!telegramEnabled}
+                    className="w-4 h-4 accent-sky-500 cursor-pointer disabled:opacity-40"
+                  />
+                </div>
+
+                {/* Payment Promises */}
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#D1D1D6]">ئاگاداری بەڵێنی دانەوەی قەرزەکان</span>
+                  <input
+                    type="checkbox"
+                    checked={telegramNotifyPromises}
+                    onChange={(e) => setTelegramNotifyPromises(e.target.checked)}
+                    disabled={!telegramEnabled}
+                    className="w-4 h-4 accent-sky-500 cursor-pointer disabled:opacity-40"
+                  />
+                </div>
+              </div>
+
+              {/* Test Connection Button & Result */}
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={testingTelegram || !telegramToken}
+                  onClick={async () => {
+                    setTestingTelegram(true);
+                    setTelegramTestResult(null);
+                    try {
+                      const res = await authenticatedFetch('/api/telegram/test', {
+                        method: 'POST',
+                        body: JSON.stringify({ bot_token: telegramToken })
+                      });
+                      const json = await res.json();
+                      if (json.status === 'success') {
+                        setTelegramTestResult({ type: 'success', message: json.message });
+                      } else if (json.status === 'warning') {
+                        setTelegramTestResult({ type: 'warning', message: json.message });
+                      } else {
+                        setTelegramTestResult({ type: 'error', message: json.message || 'خەتای تاقیکردنەوە' });
+                      }
+                    } catch (err: any) {
+                      setTelegramTestResult({ type: 'error', message: 'خەتای پەیوەندی لەگەڵ سێرڤەر' });
+                    } finally {
+                      setTestingTelegram(false);
+                    }
+                  }}
+                  className="w-full py-2.5 bg-[#2C2C2E] border border-[#3A3A3C] text-sky-400 hover:bg-[#3A3A3C] rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {testingTelegram ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>لە پشکنیندایە...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Bot className="w-4 h-4" />
+                      <span>تاقیکردنەوەی تەندروستی بۆت (Test Bot)</span>
+                    </>
+                  )}
+                </button>
+
+                {telegramTestResult && (
+                  <div className={`p-3 rounded-xl text-xs flex items-start gap-2 border ${
+                    telegramTestResult.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' :
+                    telegramTestResult.type === 'warning' ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' :
+                    'bg-red-500/10 border-red-500/30 text-red-300'
+                  }`}>
+                    {telegramTestResult.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
+                    {telegramTestResult.type === 'warning' && <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />}
+                    {telegramTestResult.type === 'error' && <X className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />}
+                    <span className="leading-relaxed">{telegramTestResult.message}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <div className="pt-2">
+              <button
+                type="button"
+                disabled={savingTelegram}
+                onClick={async () => {
+                  setSavingTelegram(true);
+                  try {
+                    await onUpdateSettings({
+                      telegram_bot_token: telegramToken,
+                      telegram_bot_username: telegramBotUser,
+                      telegram_enabled: telegramEnabled,
+                      telegram_notify_new_tx: telegramNotifyTx,
+                      telegram_notify_overdue: telegramNotifyOverdue,
+                      telegram_notify_promises: telegramNotifyPromises
+                    });
+                    setActiveModal(null);
+                  } catch (err) {
+                    alert('خەتایەک ڕوویدا لە پاشەکەوتکردنی ڕێکخستنەکان');
+                  } finally {
+                    setSavingTelegram(false);
+                  }
+                }}
+                className="w-full py-3 bg-sky-500 hover:bg-sky-600 text-white font-bold text-sm rounded-xl active-scale shadow-lg flex items-center justify-center gap-2"
+              >
+                {savingTelegram ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                <span>پاشەکەوتکردنی ڕێکخستنەکانی تێلیگرام</span>
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* OFFLINE QUEUE MODAL */}
+      {activeModal === 'OFFLINE_QUEUE' && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-md bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in text-right dir-rtl max-h-[90vh] overflow-y-auto">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-[#2C2C2E]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-sky-500/10 rounded-xl text-sky-400">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-[#F5F5F7] text-base">داواکارییەکانی دۆخی ئۆفلاین</h3>
+                  <p className="text-[11px] text-[#8E8E93]">ڕیزی مامەڵەکانی لە ناوخۆی ئامێرەکەدا پاشەکەوتکراون</p>
+                </div>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7] p-1 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content / List */}
+            {queuedCount === 0 ? (
+              <div className="py-8 text-center space-y-2">
+                <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto opacity-80" />
+                <p className="text-sm font-bold text-[#F5F5F7]">هیچ مامەڵەیەک لە ڕیزدا نییە</p>
+                <p className="text-xs text-[#8E8E93]">تەواوی زانیارییەکانت هاوکاتکراونەتەوە لەگەڵ سێرڤەردا.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between bg-sky-500/10 border border-sky-500/20 p-3 rounded-xl">
+                  <span className="text-xs font-bold text-sky-300">ژمارەی لە ڕیزدا: {queuedCount}</span>
+                  <button
+                    onClick={async () => {
+                      const res = await syncNow();
+                      if (res && res.successCount > 0) {
+                        showToast(`سەرکەوتووانە ${res.successCount} مامەڵە هاوکاتکرانەوە!`);
+                      } else if (res && res.failCount > 0) {
+                        showToast(`هاوکاتکردنەوە تەواو نەبوو. هێشتا پەیوەندی سێرڤەر نییە.`);
+                      }
+                    }}
+                    disabled={isSyncing}
+                    className="px-3 py-1.5 bg-sky-500 hover:bg-sky-400 active:scale-95 text-black font-extrabold rounded-lg text-xs flex items-center gap-1.5 transition-all disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                    <span>{isSyncing ? 'لە هاوکاتکردنەوەدایە...' : 'هاوکاتکردنەوە (Sync Now)'}</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                  {queue.map((req) => (
+                    <div key={req.id} className="bg-[#2C2C2E] border border-[#3A3A3C] rounded-xl p-3 flex items-start justify-between gap-3 text-xs">
+                      <div className="space-y-1 overflow-hidden">
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono text-[10px] font-bold">
+                            {req.method}
+                          </span>
+                          <span className="font-mono text-[#D1D1D6] truncate text-[11px]" dir="ltr">
+                            {req.url}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-[#8E8E93]">
+                          کاتی تۆمارکردن: {new Date(req.timestamp).toLocaleTimeString('ku-IQ', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => removeRequest(req.id)}
+                        className="text-rose-400 hover:text-rose-300 p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 transition-colors shrink-0"
+                        title="سڕینەوە لە ڕیز"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={() => {
+                    clearQueue();
+                    showToast('ڕیزی ئۆفلاین پاقژکرایەوە');
+                  }}
+                  className="w-full py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 mt-2"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>سڕینەوەی تەواوی ڕیزی ئۆفلاین (Clear Queue)</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* BACKUP DATA MODAL */}
+      {activeModal === 'BACKUP' && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-md bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in text-right dir-rtl">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-[#2C2C2E]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
+                  <HardDrive className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-[#F5F5F7] text-base">پاشەکەوتکردنی داتاکان (Backup Data)</h3>
+                  <p className="text-[11px] text-[#8E8E93]">دابەزاندنی نەخشەی تەواوی تۆمارەکان بە فایلی JSON</p>
+                </div>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7] p-1 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content info */}
+            <div className="bg-[#2C2C2E]/50 border border-[#3A3A3C] rounded-xl p-4 space-y-3 text-xs text-[#D1D1D6]">
+              <div className="flex items-start gap-2 text-emerald-400 bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20">
+                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  ئەم بەشە ڕاستەوخۆ فایلی پاشەکەوتی پارێزراو (JSON Snapshot) لە هەموو زانیارییەکانی کڕیاران، مامەڵەکان، و بەڵگەنامەکانی مارکێتەکەت بەشێوازی ئاسینکرۆنوس (Async) لە سێرڤەرەوە دادەبەزێنێت.
+                </p>
+              </div>
+
+              <div className="space-y-2 pt-1 border-t border-[#3A3A3C]/60">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#8E8E93]">جۆری فایل:</span>
+                  <span className="font-mono text-[#F5F5F7] font-bold bg-[#1C1C1E] px-2 py-0.5 rounded border border-[#3A3A3C]">
+                    JSON Secure Snapshot
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#8E8E93]">شێوازی داواکاری:</span>
+                  <span className="text-sky-400 font-bold">Asynchronous Download</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#8E8E93]">پاراستنی زانیاری:</span>
+                  <span className="text-emerald-400 font-bold">تایبەت و ناوی شاراوە 🔒</span>
+                </div>
+              </div>
+            </div>
+
+            {backupSuccess && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-xs font-bold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{backupSuccess}</span>
+              </div>
+            )}
+
+            {backupError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-xs font-bold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{backupError}</span>
+              </div>
+            )}
+
+            {/* Download Button */}
+            <button
+              id="download-backup-now-btn"
+              onClick={handleDownloadBackup}
+              disabled={isDownloadingBackup}
+              className="w-full py-3 bg-emerald-500 hover:bg-emerald-400 active:scale-98 text-black font-extrabold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {isDownloadingBackup ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
-                  <span>سینککردنەوە...</span>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>لە ئامادەکردن و دابەزاندندایە...</span>
                 </>
               ) : (
-                <span>سینککردنەوەی دەستبەجێ (Sync Now)</span>
+                <>
+                  <Download className="w-4 h-4" />
+                  <span>دابەزاندنی فایلی پاشەکەوت (Download Backup JSON)</span>
+                </>
               )}
             </button>
           </div>
         </div>
       )}
 
-      {/* CLOUD BACKUP VAULT MODAL */}
-      {activeModal === 'BACKUP' && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-fade-in">
-          <div className="w-full max-w-sm bg-[#1C1C1E] border border-[#2C2C2E] rounded-2xl p-5 flex flex-col gap-4 animate-scale-in">
-            <div className="flex items-center justify-between pb-2 border-b border-[#2C2C2E]">
-              <div className="flex items-center gap-2">
-                <Cloud className="w-5 h-5 text-cyan-400" />
-                <span className="font-bold text-[#F5F5F7]">پاشەکەوتی پارێزراوی هەور (Cloud Backup)</span>
-              </div>
-              <button onClick={() => setActiveModal(null)} className="text-[#8E8E93] hover:text-[#F5F5F7]">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <p className="text-xs text-[#8E8E93] leading-relaxed">
-              داتاکانی مارکێتەکەت لە چەند سەرڤەرێکی پارێزراوی جیهانی (EU & US Cloud Vaults) بە شێوەی خۆکار و کۆدکراو (Encrypted) پاشەکەوت دەکرێن.
-            </p>
-
-            <div className="bg-black border border-[#2C2C2E] rounded-xl p-3.5 flex flex-col gap-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">دۆخی ڤالتی هەور:</span>
-                <span className="text-cyan-400 font-bold flex items-center gap-1">
-                  <ShieldCheck className="w-4 h-4 text-cyan-400" />
-                  پارێزراو و کۆدکراو (AES-256)
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">سێرڤەرەکانی پشتێنە:</span>
-                <span className="text-[#F5F5F7] font-bold">Primary & 2 Replicas</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8E8E93]">دوایین کۆپی یەدەگ:</span>
-                <span className="text-[#F5F5F7] font-mono text-[11px]">{lastBackupText}</span>
-              </div>
-            </div>
-
-            <button
-              onClick={() => {
-                setIsBackingUp(true);
-                setTimeout(() => {
-                  setIsBackingUp(false);
-                  setLastBackupText('ئێستا (Manual Backup)');
-                  showToast('کۆپی یەدەگ بە سەرکەوتوویی لە هەوردا پاشەکەوت کرا');
-                }, 1200);
-              }}
-              disabled={isBackingUp}
-              className="w-full py-3 bg-cyan-500 text-black font-bold text-sm rounded-xl active-scale flex items-center justify-center gap-2"
-            >
-              {isBackingUp ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
-                  <span>دروستکردنی کۆپی یەدەگ...</span>
-                </>
-              ) : (
-                <span>دروستکردنی کۆپی یەدەگی نوێ (Backup Now)</span>
-              )}
-            </button>
-          </div>
-        </div>
-      ) }
+      {/* STAFF MANAGEMENT MODAL */}
+      <StaffManagementModal
+        isOpen={activeModal === 'STAFF'}
+        onClose={() => setActiveModal(null)}
+      />
 
     </div>
   );
