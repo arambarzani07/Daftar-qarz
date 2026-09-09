@@ -9,7 +9,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.cjs",
     "verify:offline-queue": "tsx scripts/verify_offline_queue_safety.ts",
-    "lint": "tsc --noEmit && npm run verify:offline-queue",
+    "lint": "tsc --noEmit && tsx scripts/verify_offline_queue_safety.ts",
     "bootstrap:platform-owner": "tsx scripts/bootstrap-platform-owner.ts",
     "schema:hash": "tsx scripts/generate-schema-hash.ts"
   },
