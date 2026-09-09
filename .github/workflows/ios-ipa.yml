@@ -14,7 +14,7 @@ on:
       - 'capacitor.config.ts'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-unsigned-ipa:
@@ -76,7 +76,7 @@ jobs:
           test -s build/Daftar-qarz-unsigned.ipa
           shasum -a 256 build/Daftar-qarz-unsigned.ipa | tee build/Daftar-qarz-unsigned.ipa.sha256
 
-      - name: Upload unsigned IPA
+      - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: Daftar-qarz-unsigned-ipa
@@ -85,3 +85,23 @@ jobs:
             build/Daftar-qarz-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish stable Safari download release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ios-latest"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              build/Daftar-qarz-unsigned.ipa \
+              build/Daftar-qarz-unsigned.ipa.sha256 \
+              --clobber
+          else
+            gh release create "$TAG" \
+              build/Daftar-qarz-unsigned.ipa \
+              build/Daftar-qarz-unsigned.ipa.sha256 \
+              --target "$GITHUB_SHA" \
+              --title "Daftar-qarz iOS IPA" \
+              --notes "Latest unsigned iOS IPA build. This IPA must be signed before installation on a standard iPhone."
+          fi
