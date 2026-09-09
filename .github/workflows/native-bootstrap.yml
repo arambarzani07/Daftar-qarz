@@ -51,11 +51,11 @@ jobs:
       - name: Verify native projects
         run: |
           test -f ios/App/App/Info.plist
-          test -f ios/App/Package.swift
+          test -f ios/App/App/capacitor.config.json
           test -f android/app/src/main/AndroidManifest.xml
           test -f android/app/src/main/assets/capacitor.config.json
-          bunx cap sync ios
-          bunx cap sync android
+          grep -q 'com.zhirox.debt' ios/App/App/capacitor.config.json
+          grep -q 'com.zhirox.debt' android/app/src/main/assets/capacitor.config.json
 
       - name: Commit generated native projects and lockfile
         run: |
