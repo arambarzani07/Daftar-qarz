@@ -53,19 +53,25 @@ for (const dependency of [
   assert(deps[dependency], `Required native dependency is missing: ${dependency}`);
 }
 
-assert(fs.existsSync('ios/App/App/Info.plist'), 'Committed iOS native project is missing');
-assert(fs.existsSync('ios/App/App/capacitor.config.json'), 'Committed iOS Capacitor config is missing');
-assert(fs.existsSync('android/app/src/main/AndroidManifest.xml'), 'Committed Android native project is missing');
-assert(fs.existsSync('android/app/src/main/assets/capacitor.config.json'), 'Committed Android Capacitor config is missing');
+const iosInfoPath = 'ios/App/App/Info.plist';
+const iosProjectPath = 'ios/App/App.xcodeproj/project.pbxproj';
+const androidManifestPath = 'android/app/src/main/AndroidManifest.xml';
+const androidGradlePath = 'android/app/build.gradle';
 
-const iosNativeConfig = read('ios/App/App/capacitor.config.json');
-const androidNativeConfig = read('android/app/src/main/assets/capacitor.config.json');
-assert(iosNativeConfig.includes('com.zhirox.debt'), 'iOS native appId does not match Capacitor config');
-assert(androidNativeConfig.includes('com.zhirox.debt'), 'Android native appId does not match Capacitor config');
+assert(fs.existsSync(iosInfoPath), 'Committed iOS native project is missing');
+assert(fs.existsSync(iosProjectPath), 'Committed iOS Xcode project is missing');
+assert(fs.existsSync(androidManifestPath), 'Committed Android native project is missing');
+assert(fs.existsSync(androidGradlePath), 'Committed Android Gradle app project is missing');
 
-const androidManifest = read('android/app/src/main/AndroidManifest.xml');
+const iosProject = read(iosProjectPath);
+const androidGradle = read(androidGradlePath);
+assert(iosProject.includes('com.zhirox.debt'), 'iOS bundle identifier does not match Capacitor appId');
+assert(androidGradle.includes('applicationId "com.zhirox.debt"'), 'Android applicationId does not match Capacitor appId');
+assert(androidGradle.includes('namespace = "com.zhirox.debt"'), 'Android namespace does not match Capacitor appId');
+
+const androidManifest = read(androidManifestPath);
 assert(androidManifest.includes('android:allowBackup="false"'), 'Android backups must remain disabled for financial/session data');
 assert(androidManifest.includes('android:fullBackupContent="false"'), 'Android full backup content must remain disabled');
 assert(androidManifest.includes('android:usesCleartextTraffic="false"'), 'Android plaintext HTTP traffic must remain disabled');
 
-console.log('Mobile/PWA hardening verification passed with committed iOS and Android projects.');
+console.log('Mobile/PWA hardening verification passed with committed iOS and Android source projects.');
