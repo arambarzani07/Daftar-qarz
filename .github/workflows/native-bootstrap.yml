@@ -1,0 +1,67 @@
+name: One-time Native Bootstrap
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/native-bootstrap.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install current lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Install Capacitor 8 native runtime and plugins
+        run: |
+          bun add \
+            @capacitor/core@8.5.1 \
+            @capacitor/ios@8.5.1 \
+            @capacitor/android@8.5.1 \
+            @capacitor/splash-screen@8.0.2 \
+            @capacitor/keyboard@8.0.5 \
+            @capacitor/status-bar@8.0.3
+          bun add -d @capacitor/cli@8.5.1
+
+      - name: Build production web bundle
+        run: bun run build
+
+      - name: Create native projects
+        run: |
+          if [ ! -d ios ]; then bunx cap add ios; fi
+          if [ ! -d android ]; then bunx cap add android; fi
+          bunx cap sync
+
+      - name: Verify native projects
+        run: |
+          test -f ios/App/App/Info.plist
+          test -f android/app/src/main/AndroidManifest.xml
+          bunx cap doctor
+
+      - name: Commit generated native projects and lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json bun.lock ios android
+          if git diff --cached --quiet; then
+            echo "Native projects already up to date."
+            exit 0
+          fi
+          git commit -m "feat: add Capacitor iOS and Android native projects"
+          git push origin HEAD:main
