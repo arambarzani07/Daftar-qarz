@@ -77,6 +77,11 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      - name: Bootstrap ephemeral verification database
+        env:
+          POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
+        run: bunx tsx scripts/bootstrap_ci_database.ts
+
       - name: Migration Verification & Immutability Test
         env:
           POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
