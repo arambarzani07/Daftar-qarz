@@ -89,6 +89,13 @@ async function bootstrap() {
       await applyFile(client, path.join(supabaseDir, file), `supabase/${file}`);
     }
 
+    // The historical app migration chain starts from a database that already had
+    // the old inline baseline. Recreate only those legacy baseline columns here;
+    // do not edit historical migration files, because their checksums are immutable.
+    await client.query(`
+      ALTER TABLE public.users ADD COLUMN IF NOT EXISTS phone TEXT;
+    `);
+
     // Server startup intentionally refuses an untracked schema. CI creates the
     // tracker explicitly, then applies every forward migration and records its hash.
     await client.query(`
