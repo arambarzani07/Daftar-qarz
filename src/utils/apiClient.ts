@@ -323,7 +323,7 @@ export async function syncOfflineQueue(): Promise<SyncResult> {
       }
 
       const replayHeaders = sanitizeHeadersForStorage(item.headers || {});
-      if (item.idempotencyKey) replayHeaders['Idempotency-Key'] = item.idempotencyKey;
+      if (item.idempotencyKey) setHeaderIfMissing(replayHeaders, 'Idempotency-Key', item.idempotencyKey);
 
       const options: ExtendedRequestInit = {
         method: item.method,
