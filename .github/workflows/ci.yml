@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -20,50 +24,50 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d zhirox_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 18
-          cache: 'npm'
+          bun-version: latest
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies from lockfile
+        run: bun install --frozen-lockfile
 
-      - name: TypeScript Typecheck
-        run: npx tsc --noEmit
+      - name: TypeScript typecheck
+        run: bunx tsc --noEmit
 
       - name: Lint
-        run: npm run lint || echo "Lint passed with warnings"
+        run: bun run lint
 
       - name: Migration Verification & Immutability Test
         env:
           POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
-        run: npx tsx scripts/verify_ledger_immutability.ts
+        run: bunx tsx scripts/verify_ledger_immutability.ts
 
       - name: Security Auth Boundary Tests
         env:
           POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
           SUPABASE_JWT_SECRET: test-supabase-jwt-secret-key-12345
-        run: npx tsx scripts/verify_auth_boundary.ts
+        run: bunx tsx scripts/verify_auth_boundary.ts
 
       - name: Financial Core Invariant Proofs
         env:
           POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
-        run: npx tsx scripts/run_full_financial_proof.ts
+        run: bunx tsx scripts/run_full_financial_proof.ts
 
       - name: Authorization Matrix Verification (32/32)
         env:
           POSTGRES_URL: postgres://postgres:postgrespassword@localhost:5432/zhirox_test
           SUPABASE_JWT_SECRET: test-supabase-jwt-secret-key-12345
-        run: npx tsx scripts/verify_full_matrix.ts
+        run: bunx tsx scripts/verify_full_matrix.ts
 
       - name: Production Bundle Build
-        run: npm run build
+        run: bun run build
