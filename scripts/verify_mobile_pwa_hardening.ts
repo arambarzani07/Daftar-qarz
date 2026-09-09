@@ -41,9 +41,26 @@ assert(capacitor.includes("webDir: 'dist'"), 'Capacitor must point to the produc
 assert(capacitor.includes('cleartext: false'), 'Capacitor Android cleartext traffic must remain disabled');
 
 const deps = { ...(packageJson.dependencies || {}), ...(packageJson.devDependencies || {}) };
-const nativeReady = Boolean(deps['@capacitor/core'] && deps['@capacitor/cli'] && deps['@capacitor/ios'] && deps['@capacitor/android']);
-if (!nativeReady) {
-  console.warn('[Mobile Gate] Capacitor config is hardened, but native Capacitor packages/projects are not yet installed.');
+for (const dependency of [
+  '@capacitor/core',
+  '@capacitor/cli',
+  '@capacitor/ios',
+  '@capacitor/android',
+  '@capacitor/splash-screen',
+  '@capacitor/keyboard',
+  '@capacitor/status-bar'
+]) {
+  assert(deps[dependency], `Required native dependency is missing: ${dependency}`);
 }
 
-console.log('Mobile/PWA hardening verification passed.');
+assert(fs.existsSync('ios/App/App/Info.plist'), 'Committed iOS native project is missing');
+assert(fs.existsSync('ios/App/App/capacitor.config.json'), 'Committed iOS Capacitor config is missing');
+assert(fs.existsSync('android/app/src/main/AndroidManifest.xml'), 'Committed Android native project is missing');
+assert(fs.existsSync('android/app/src/main/assets/capacitor.config.json'), 'Committed Android Capacitor config is missing');
+
+const iosNativeConfig = read('ios/App/App/capacitor.config.json');
+const androidNativeConfig = read('android/app/src/main/assets/capacitor.config.json');
+assert(iosNativeConfig.includes('com.zhirox.debt'), 'iOS native appId does not match Capacitor config');
+assert(androidNativeConfig.includes('com.zhirox.debt'), 'Android native appId does not match Capacitor config');
+
+console.log('Mobile/PWA hardening verification passed with committed iOS and Android projects.');
