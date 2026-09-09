@@ -51,8 +51,11 @@ jobs:
       - name: Verify native projects
         run: |
           test -f ios/App/App/Info.plist
+          test -f ios/App/Package.swift
           test -f android/app/src/main/AndroidManifest.xml
-          bunx cap doctor
+          test -f android/app/src/main/assets/capacitor.config.json
+          bunx cap sync ios
+          bunx cap sync android
 
       - name: Commit generated native projects and lockfile
         run: |
