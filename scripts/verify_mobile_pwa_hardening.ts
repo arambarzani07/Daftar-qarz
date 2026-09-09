@@ -63,4 +63,9 @@ const androidNativeConfig = read('android/app/src/main/assets/capacitor.config.j
 assert(iosNativeConfig.includes('com.zhirox.debt'), 'iOS native appId does not match Capacitor config');
 assert(androidNativeConfig.includes('com.zhirox.debt'), 'Android native appId does not match Capacitor config');
 
+const androidManifest = read('android/app/src/main/AndroidManifest.xml');
+assert(androidManifest.includes('android:allowBackup="false"'), 'Android backups must remain disabled for financial/session data');
+assert(androidManifest.includes('android:fullBackupContent="false"'), 'Android full backup content must remain disabled');
+assert(androidManifest.includes('android:usesCleartextTraffic="false"'), 'Android plaintext HTTP traffic must remain disabled');
+
 console.log('Mobile/PWA hardening verification passed with committed iOS and Android projects.');
