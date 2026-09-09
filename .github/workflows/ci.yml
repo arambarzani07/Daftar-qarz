@@ -41,6 +41,36 @@ jobs:
       - name: Install dependencies from lockfile
         run: bun install --frozen-lockfile
 
+      - name: Enable TLS on PostgreSQL test service
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker ps --filter 'ancestor=postgres:15' --format '{{.ID}}' | head -n 1)"
+          test -n "$container_id"
+
+          cert_dir="$(mktemp -d)"
+          openssl req -new -x509 -nodes -days 1 \
+            -subj '/CN=localhost' \
+            -keyout "$cert_dir/server.key" \
+            -out "$cert_dir/server.crt"
+          chmod 600 "$cert_dir/server.key"
+
+          docker cp "$cert_dir/server.key" "$container_id:/var/lib/postgresql/server.key"
+          docker cp "$cert_dir/server.crt" "$container_id:/var/lib/postgresql/server.crt"
+          docker exec "$container_id" chown postgres:postgres /var/lib/postgresql/server.key /var/lib/postgresql/server.crt
+          docker exec "$container_id" chmod 600 /var/lib/postgresql/server.key
+          docker exec "$container_id" sh -lc "printf '\nssl = on\nssl_cert_file = '\''/var/lib/postgresql/server.crt'\''\nssl_key_file = '\''/var/lib/postgresql/server.key'\''\n' >> /var/lib/postgresql/data/postgresql.conf"
+          docker restart "$container_id" >/dev/null
+
+          for _ in $(seq 1 30); do
+            if docker exec "$container_id" pg_isready -U postgres -d zhirox_test >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'PostgreSQL did not become ready after enabling TLS' >&2
+          exit 1
+
       - name: TypeScript typecheck
         run: bunx tsc --noEmit
 
