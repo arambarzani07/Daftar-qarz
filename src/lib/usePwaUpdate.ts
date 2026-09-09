@@ -16,33 +16,58 @@ export function usePwaUpdate(): PwaUpdateState {
     }
 
     let refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
+    let disposed = false;
+    let registration: ServiceWorkerRegistration | null = null;
+
+    const handleControllerChange = () => {
       if (!refreshing) {
         refreshing = true;
         window.location.reload();
       }
-    });
+    };
 
-    navigator.serviceWorker.register('/sw.js').then((registration) => {
-      if (registration.waiting) {
-        setWaitingWorker(registration.waiting);
-        setHasUpdate(true);
-      }
+    const handleUpdateFound = () => {
+      const newWorker = registration?.installing;
+      if (!newWorker) return;
 
-      registration.addEventListener('updatefound', () => {
-        const newWorker = registration.installing;
-        if (newWorker) {
-          newWorker.addEventListener('statechange', () => {
-            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              setWaitingWorker(newWorker);
-              setHasUpdate(true);
-            }
-          });
+      const handleStateChange = () => {
+        if (
+          !disposed &&
+          newWorker.state === 'installed' &&
+          navigator.serviceWorker.controller
+        ) {
+          setWaitingWorker(newWorker);
+          setHasUpdate(true);
         }
+      };
+
+      newWorker.addEventListener('statechange', handleStateChange);
+    };
+
+    navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
+
+    navigator.serviceWorker.ready
+      .then((readyRegistration) => {
+        if (disposed) return;
+        registration = readyRegistration;
+
+        if (registration.waiting) {
+          setWaitingWorker(registration.waiting);
+          setHasUpdate(true);
+        }
+
+        registration.addEventListener('updatefound', handleUpdateFound);
+        registration.update().catch(() => undefined);
+      })
+      .catch((err) => {
+        console.warn('[SW] Existing registration unavailable:', err);
       });
-    }).catch((err) => {
-      console.warn('[SW] Registration failed:', err);
-    });
+
+    return () => {
+      disposed = true;
+      navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
+      registration?.removeEventListener('updatefound', handleUpdateFound);
+    };
   }, []);
 
   const applyUpdate = useCallback(() => {
